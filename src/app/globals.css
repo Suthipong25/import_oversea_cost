@@ -1,0 +1,145 @@
+@import "tailwindcss";
+
+:root {
+  /* Surfaces */
+  --surface-canvas: #f5f7fb;
+  --surface-card: #ffffff;
+  --surface-subtle: #f8fafc;
+  --surface-muted: #eef2f7;
+  --surface-sidebar: #0c1e35;
+  --surface-sidebar-hover: rgba(255, 255, 255, 0.08);
+  --surface-sidebar-active: rgba(255, 255, 255, 0.14);
+
+  /* Borders */
+  --border-subtle: #e6ebf2;
+  --border-default: #d3dce7;
+  --border-strong: #94a3b8;
+
+  /* Typography */
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-sidebar: #e2e8f0;
+  --text-sidebar-muted: #94a3b8;
+
+  /* Brand & Accent */
+  --brand: #0c2340;
+  --brand-hover: #163661;
+  --brand-fg: #ffffff;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: #eff6ff;
+
+  /* Semantic Status (WCAG 2.2 AA Contrast) */
+  --status-success-bg: #ecfdf5;
+  --status-success-fg: #065f46;
+  --status-success-border: #a7f3d0;
+  --status-warn-bg: #fffbeb;
+  --status-warn-fg: #92400e;
+  --status-warn-border: #fde68a;
+  --status-danger-bg: #fef2f2;
+  --status-danger-fg: #991b1b;
+  --status-danger-border: #fecaca;
+
+  /* Layered Subtle Shadows (Better UI Standard) */
+  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 20px -6px rgba(15, 23, 42, 0.07);
+  --shadow-modal: 0 12px 32px -8px rgba(15, 23, 42, 0.18), 0 4px 12px -4px rgba(15, 23, 42, 0.08);
+
+  /* Legacy alias bindings for uninterrupted compatibility */
+  --color-bg: var(--surface-canvas);
+  --color-surface: var(--surface-card);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border-subtle);
+  --color-border-strong: var(--border-default);
+  --color-text: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-primary: var(--brand);
+  --color-primary-hover: var(--brand-hover);
+  --color-primary-foreground: var(--brand-fg);
+  --color-accent: var(--accent);
+  --color-success: var(--status-success-fg);
+  --color-warning: var(--status-warn-fg);
+  --color-destructive: var(--status-danger-fg);
+}
+
+body {
+  background-color: var(--surface-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-latin), var(--font-thai), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.card-elevated {
+  background-color: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
+}
+
+.accounting-total {
+  border-top: 1.5px solid var(--text-primary);
+  border-bottom: 4px double var(--text-primary);
+}
+
+/* Targeted transition utility — never transition: all */
+.ui-interactive {
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
+}
+
+@keyframes pageEnter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Important: do NOT use fill-mode `forwards` or `both` with `transform`,
+   otherwise the ancestor retains a containing block that traps `position: fixed` modals. */
+.page-enter {
+  animation: pageEnter 200ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes navProgressIndeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.nav-progress-glow {
+  animation: navProgressIndeterminate 1.1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+  body {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .card-elevated {
+    box-shadow: none !important;
+  }
+}
