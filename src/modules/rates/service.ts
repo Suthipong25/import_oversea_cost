@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import Decimal from 'decimal.js';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { db, withUserContext } from '@/lib/db';
 import {
@@ -387,10 +388,19 @@ export async function ingestRateForShipment(user: AuthUser, params: IngestRatePa
         const matched = matchChargeToCatalog(ch.rawChargeName, catalogRows, aliasRows);
         const resolvedCategory = matched?.category ?? ch.categoryHint;
         const isDest = isDestinationCharge(ch.rawChargeName, resolvedCategory);
+        const appliedMult = isDest && ch.multiplier && ch.multiplier > 1 ? ch.multiplier : 1;
         const amountThb = parseMoneyInput(isDest ? (ch.unitAmountThb ?? ch.amountThb) : ch.amountThb);
         const amountUsd = parseMoneyInput(isDest ? (ch.unitAmountUsd ?? ch.amountUsd) : ch.amountUsd);
-        const whtAmount = parseMoneyInput(ch.whtAmount) ?? '0.0000';
-        const vatAmount = parseMoneyInput(ch.vatAmount) ?? '0.0000';
+        const rawWht =
+          ch.whtAmount !== null && appliedMult > 1
+            ? new Decimal(ch.whtAmount).dividedBy(appliedMult).toNumber()
+            : ch.whtAmount;
+        const rawVat =
+          ch.vatAmount !== null && appliedMult > 1
+            ? new Decimal(ch.vatAmount).dividedBy(appliedMult).toNumber()
+            : ch.vatAmount;
+        const whtAmount = parseMoneyInput(rawWht) ?? '0.0000';
+        const vatAmount = parseMoneyInput(rawVat) ?? '0.0000';
 
         return {
           rateRecordId: rate.id,

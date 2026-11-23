@@ -128,3 +128,58 @@ export function convertUsdToThb(
   }
   return rawThb.toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(4);
 }
+
+/**
+ * ดึงตัวคูณจำนวน/ปริมาตร (Multiplier) จากข้อความ "ขนาดตู้ / Volume" เช่น:
+ * - "LCL · 3 CBM" -> 3
+ * - "4 CBM" / "4 R/T" / "2.5 W/M" -> 4 / 2.5
+ * - "2×40DV" -> 2
+ * - "1×40DV" / "40DV" -> 1
+ * - "3" -> 3
+ */
+export function parseVolumeMultiplierFromSummary(summary: string | null | undefined): number {
+  if (!summary) return 1;
+  const raw = summary.trim();
+  if (!raw) return 1;
+
+  // 1. กรณีระบุหน่วยปริมาตรชัดเจน เช่น "LCL · 3 CBM", "3 cbm", "4 R/T", "2.5 W/M", "3 คิว"
+  const volMatch = raw.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:cbm|m3|r\/?t|w\/?m|wlm|คิว)\b/i);
+  if (volMatch?.[1]) {
+    const val = Number(volMatch[1]);
+    if (Number.isFinite(val) && val > 0) return val;
+  }
+
+  // 2. กรณีระบุจำนวนตู้แบบ "2×40DV" หรือ "1×40DV + 2×20GP"
+  const cntrMatches = [
+    ...raw.matchAll(/([0-9]+(?:\.[0-9]+)?)\s*[x×*]\s*(?:20|40|45)\s*(?:GP|DV|HQ|HC|RF|OT|FR)?/gi),
+  ];
+  if (cntrMatches.length > 0) {
+    const totalQty = cntrMatches.reduce((sum, m) => sum + (Number(m[1]) || 0), 0);
+    if (totalQty > 0) return totalQty;
+  }
+
+  // 3. ลบชื่อขนาดตู้มาตรฐานออกก่อน (เช่น 20GP, 40DV, 40HQ, 45HQ, 20RF, 40RF, 20', 40') เพื่อไม่ให้เลข 20/40 ถูกเข้าใจผิดเป็นตัวคูณ
+  const cleaned = raw.replace(/\b(?:20|40|45)\s*(?:GP|DV|HQ|HC|RF|OT|FR|'|ft)\b/gi, '').trim();
+
+  // 4. ดึงตัวเลขที่เหลือในช่อง (เช่น "LCL 3", "3", "×3", "*3")
+  const numMatch = cleaned.match(/([0-9]+(?:\.[0-9]+)?)/);
+  if (numMatch?.[1]) {
+    const val = Number(numMatch[1]);
+    if (Number.isFinite(val) && val > 0) return val;
+  }
+
+  return 1;
+}
+
+/**
+ * ตรวจสอบว่ารายการค่าใช้จ่ายนี้เป็นหมวด Destination Charge (ปลายทาง / Dest_Port) หรือไม่
+ * กฎทางธุรกิจ: Destination Charge ต้องคงค่าเดิมตามที่ใส่ไว้เสมอ ต่อให้จำนวนของ/ปริมาตรเพิ่มขึ้น
+ */
+export function isDestinationCharge(rawChargeName: string, category?: string | null): boolean {
+  if (category === 'Dest_Port') return true;
+  if (category && category !== 'Other') return false;
+
+  return /\b(?:dest\b|destination|dthc|trml\s*handlg|terminal\s*handling|thc\b|d\/?o\s*fee|delivery\s*order|eqpt\s*cleaning|container\s*cleaning|cleaning\s*fee|equipment\s*maintenance|maintenance\s*premium|emp\b|cis\s*\/\s*cic|\bcis\b|\bcic\b|cfs\b|seal\s*fee|\bseal\b|e-seal|fac\b|status\s*fee|pcs\b|port\s*congestion)\b/i.test(
+    rawChargeName
+  );
+}

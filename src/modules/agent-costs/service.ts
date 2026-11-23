@@ -294,8 +294,17 @@ export async function createStandaloneAgentCost(
         const matched = matchChargeToCatalog(ch.rawChargeName, catalogRows, aliasRows);
         const resolvedCategory = matched?.category ?? ch.categoryHint ?? 'Other';
         const isDest = isDestinationCharge(ch.rawChargeName, resolvedCategory);
+        const appliedMult = isDest && ch.multiplier && ch.multiplier > 1 ? ch.multiplier : 1;
         const rawUsd = isDest ? (ch.unitAmountUsd ?? ch.amountUsd) : ch.amountUsd;
         const rawThb = isDest ? (ch.unitAmountThb ?? ch.amountThb) : ch.amountThb;
+        const rawWht =
+          ch.whtAmount !== null && appliedMult > 1
+            ? new Decimal(ch.whtAmount).dividedBy(appliedMult).toNumber()
+            : ch.whtAmount;
+        const rawVat =
+          ch.vatAmount !== null && appliedMult > 1
+            ? new Decimal(ch.vatAmount).dividedBy(appliedMult).toNumber()
+            : ch.vatAmount;
         const amountUsdStr = rawUsd !== null && rawUsd !== undefined ? rawUsd.toFixed(4) : null;
         // If only USD was quoted, convert using Perkin's CEIL_100 FX formula so THB total is ready immediately
         const amountThbStr =
@@ -315,11 +324,11 @@ export async function createStandaloneAgentCost(
           currency: amountUsdStr ? 'USD' : amountThbStr ? 'THB' : null,
           amountUsd: amountUsdStr,
           amountThb: amountThbStr,
-          fxRateUsed: amountUsdStr && ch.amountThb === null ? fxRateNum.toFixed(4) : null,
+          fxRateUsed: amountUsdStr && rawThb === null ? fxRateNum.toFixed(4) : null,
           whtPercent: matched?.defaultWhtPercent ?? '0.00',
-          whtAmount: ch.whtAmount !== null ? ch.whtAmount.toFixed(4) : '0.0000',
+          whtAmount: rawWht !== null && rawWht !== undefined ? rawWht.toFixed(4) : '0.0000',
           vatPercent: matched?.defaultVatPercent ?? '0.00',
-          vatAmount: ch.vatAmount !== null ? ch.vatAmount.toFixed(4) : '0.0000',
+          vatAmount: rawVat !== null && rawVat !== undefined ? rawVat.toFixed(4) : '0.0000',
           chargeUnit: ch.chargeUnit ?? 'PER_SHIPMENT',
           sourcePage: ch.sourcePage ?? 1,
           sourceTextSnippet: ch.sourceTextSnippet ?? null,
@@ -388,11 +397,18 @@ export async function updateStandaloneAgentCostMeta(
   const nextPod = input.podPortCode.trim().toUpperCase();
   const nextSummary =
     input.containerSummary.trim() || (input.modeType === 'LCL' ? 'LCL' : '1×40DV');
-
-  const prevMultiplier = parseVolumeMultiplierFromSummary(existing.containerSummary);
   const nextMultiplier = parseVolumeMultiplierFromSummary(nextSummary);
 
   return withUserContext(user, async (tx) => {
+    const [currentInTx] = await tx
+      .select()
+      .from(rateRecords)
+      .where(eq(rateRecords.id, rateRecordId))
+      .limit(1);
+
+    if (!currentInTx) throw new Error('NOT_FOUND');
+    const prevMultiplier = parseVolumeMultiplierFromSummary(currentInTx.containerSummary);
+
     const [updated] = await tx
       .update(rateRecords)
       .set({

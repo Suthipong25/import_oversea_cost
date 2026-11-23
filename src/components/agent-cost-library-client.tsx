@@ -23,6 +23,10 @@ import {
 import type { StandaloneAgentCostItem } from '@/modules/agent-costs/service';
 import type { ShipmentListItem } from '@/modules/shipments/repo';
 import type { LiveFxSnapshot } from '@/lib/fx/live-rate';
+import {
+  isDestinationCharge,
+  parseVolumeMultiplierFromSummary,
+} from '@/domain/comparison/scope';
 import { DeleteShipmentButton } from '@/components/delete-shipment-button';
 import { NewShipmentDialog } from '@/components/new-shipment-dialog';
 import { LiveFxBadge } from '@/components/live-fx-badge';
@@ -90,35 +94,6 @@ function fmtInput(val: string | null | undefined): string {
   }
 }
 
-function parseClientVolumeMultiplier(summary: string | null | undefined): number {
-  if (!summary) return 1;
-  const raw = summary.trim();
-  if (!raw) return 1;
-
-  const volMatch = raw.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:cbm|m3|r\/?t|w\/?m|wlm|คิว)\b/i);
-  if (volMatch?.[1]) {
-    const val = Number(volMatch[1]);
-    if (Number.isFinite(val) && val > 0) return val;
-  }
-
-  const cntrMatches = [
-    ...raw.matchAll(/([0-9]+(?:\.[0-9]+)?)\s*[x×*]\s*(?:20|40|45)\s*(?:GP|DV|HQ|HC|RF|OT|FR)?/gi),
-  ];
-  if (cntrMatches.length > 0) {
-    const totalQty = cntrMatches.reduce((sum, m) => sum + (Number(m[1]) || 0), 0);
-    if (totalQty > 0) return totalQty;
-  }
-
-  const cleaned = raw.replace(/\b(?:20|40|45)\s*(?:GP|DV|HQ|HC|RF|OT|FR|'|ft)\b/gi, '').trim();
-  const numMatch = cleaned.match(/([0-9]+(?:\.[0-9]+)?)/);
-  if (numMatch?.[1]) {
-    const val = Number(numMatch[1]);
-    if (Number.isFinite(val) && val > 0) return val;
-  }
-
-  return 1;
-}
-
 function scaleValueByRatio(val: string | null | undefined, ratio: Decimal): string | null {
   if (val === null || val === undefined || val === '') return null;
   if (ratio.eq(1)) return val;
@@ -129,14 +104,6 @@ function scaleValueByRatio(val: string | null | undefined, ratio: Decimal): stri
   } catch {
     return val;
   }
-}
-
-function isClientDestinationCharge(rawChargeName: string, category?: string | null): boolean {
-  if (category === 'Dest_Port') return true;
-  if (category && category !== 'Other') return false;
-  return /\b(?:dest\b|destination|dthc|trml\s*handlg|terminal\s*handling|thc\b|d\/?o\s*fee|delivery\s*order|eqpt\s*cleaning|container\s*cleaning|cleaning\s*fee|equipment\s*maintenance|maintenance\s*premium|emp\b|cis\s*\/\s*cic|\bcis\b|\bcic\b|cfs\b|seal\s*fee|\bseal\b|e-seal|fac\b|status\s*fee|pcs\b|port\s*congestion)\b/i.test(
-    rawChargeName
-  );
 }
 
 function shipmentStatusLabel(status: string): string {
@@ -554,17 +521,17 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
   }
 
   const createModalMultiplier = useMemo(
-    () => parseClientVolumeMultiplier(containerSummary),
+    () => parseVolumeMultiplierFromSummary(containerSummary),
     [containerSummary]
   );
 
   const savedDetailMultiplier = useMemo(
-    () => (activeDetailItem ? parseClientVolumeMultiplier(activeDetailItem.containerSummary) : 1),
+    () => (activeDetailItem ? parseVolumeMultiplierFromSummary(activeDetailItem.containerSummary) : 1),
     [activeDetailItem]
   );
 
   const liveDetailMultiplier = useMemo(
-    () => parseClientVolumeMultiplier(editContainerSummary),
+    () => parseVolumeMultiplierFromSummary(editContainerSummary),
     [editContainerSummary]
   );
 
@@ -588,7 +555,7 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
 
     for (const ch of activeDetailItem.charges) {
       if (ch.cellStatus !== 'QUOTED') continue;
-      const isDest = isClientDestinationCharge(ch.rawChargeName, ch.category);
+      const isDest = isDestinationCharge(ch.rawChargeName, ch.category);
       const rowRatio = isDest ? new Decimal(1) : liveDetailRatio;
 
       if (ch.whtAmount) wht = wht.plus(new Decimal(ch.whtAmount).times(rowRatio));
@@ -606,7 +573,7 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
   }, [activeDetailItem, liveDetailRatio]);
 
   async function saveDetailMetaValues(nextSummaryOverride?: string) {
-    if (!activeDetailItem) return;
+    if (!activeDetailItem || detailBusy) return;
     const summaryToSave = (nextSummaryOverride ?? editContainerSummary).trim();
     if (!summaryToSave) return;
     setDetailBusy(true);
@@ -1768,7 +1735,7 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
                     </thead>
                     <tbody className="divide-y divide-[var(--border-subtle)]">
                       {activeDetailItem.charges.map((ch) => {
-                        const isDest = isClientDestinationCharge(ch.rawChargeName, ch.category);
+                        const isDest = isDestinationCharge(ch.rawChargeName, ch.category);
                         const rowRatio = isDest ? new Decimal(1) : liveDetailRatio;
                         const displayWht = scaleValueByRatio(ch.whtAmount, rowRatio) ?? ch.whtAmount;
                         const displayVat = scaleValueByRatio(ch.vatAmount, rowRatio) ?? ch.vatAmount;
