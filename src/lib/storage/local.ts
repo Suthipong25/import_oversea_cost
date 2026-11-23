@@ -15,8 +15,8 @@ export interface ValidatedFile {
 }
 
 /**
- * Inspects file magic bytes (never trusts client-supplied MIME or extension).
- * Supports PDF, PNG, JPEG, and WEBP only.
+ * ตรวจสอบชนิดไฟล์จาก Magic Bytes ที่หัวไฟล์จริง (ไม่เชื่อถือ MIME หรือนามสกุลไฟล์ที่ Client ส่งมา)
+ * รองรับเฉพาะเอกสาร PDF และรูปภาพ PNG, JPEG, WEBP ขนาดไม่เกิน 20 MB
  */
 export function validateFileMagicBytes(buffer: Buffer): ValidatedFile {
   if (buffer.length === 0) {
@@ -104,6 +104,10 @@ function getSigningSecret(): string {
   return process.env.APP_SECRET ?? 'perkin-freightrate-dev-fallback-secret';
 }
 
+/**
+ * บันทึกไฟล์แนบต้นฉบับลงโฟลเดอร์ส่วนตัวของระบบ (อยู่นอกโฟลเดอร์ Public เสมอ)
+ * กรองชื่อโฟลเดอร์ shipmentId ป้องกัน Directory Traversal Attack
+ */
 export async function savePrivateFile(
   shipmentId: string,
   buffer: Buffer,
@@ -123,6 +127,9 @@ export async function savePrivateFile(
   return relPath;
 }
 
+/**
+ * อ่านไฟล์ส่วนตัวจากดิสก์ พร้อมตรวจสอบ Path Traversal ข้ามขอบเขต Storage Root
+ */
 export async function readPrivateFile(relPath: string): Promise<Buffer> {
   const root = getStorageRoot();
   const absPath = path.resolve(root, relPath);
@@ -132,6 +139,10 @@ export async function readPrivateFile(relPath: string): Promise<Buffer> {
   return readFile(absPath);
 }
 
+/**
+ * สร้าง URL พร้อมลายเซ็นดิจิทัล HMAC-SHA256 ที่มีวันหมดอายุ (ค่าเริ่มต้น 15 นาที)
+ * สำหรับให้ผู้ใช้เปิดพรีวิวดูเอกสารต้นฉบับได้อย่างปลอดภัย โดยไม่ต้องเปิดไฟล์เป็น Public
+ */
 export function signDocumentUrl(documentId: string, ttlSeconds = 900): string {
   const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
   const payload = `${documentId}:${exp}`;
@@ -139,6 +150,10 @@ export function signDocumentUrl(documentId: string, ttlSeconds = 900): string {
   return `/api/documents/${documentId}/file?exp=${exp}&token=${token}`;
 }
 
+/**
+ * ตรวจสอบความถูกต้องและวันหมดอายุของ Token ลายเซ็นแนบไฟล์
+ * ป้องกันการแก้ไข Document ID หรือเวลาหมดอายุใน Query String
+ */
 export function verifyDocumentSignature(
   documentId: string,
   expStr: string | null,

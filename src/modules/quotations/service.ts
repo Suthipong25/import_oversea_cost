@@ -31,6 +31,11 @@ const DEFAULT_TERMS = [
   '3. ไม่รวมค่าภาษีนำเข้า-ส่งออก ค่าตรวจปล่อยพิเศษ และค่าปรับจากการคืนตู้ล่าช้า (Excludes customs duties, special inspections, and demurrage/detention beyond free time).',
 ].join('\n');
 
+/**
+ * รันเลขใบเสนอราคาอัตโนมัติรูปแบบ `YYYY.MMDDXXX` (เช่น `2026.1118001`) ภายใน Transaction
+ * ใช้ `pg_advisory_xact_lock(hashtext(prefix))` ล็อกเฉพาะวันเดียวกันเพื่อป้องกันเลขซ้ำ
+ * เมื่อมีพนักงาน 2 คนกดสร้างใบเสนอราคาพร้อมกันในวินาทีเดียวกัน
+ */
 async function generateQuotationNumberInTx(
   tx: Parameters<Parameters<typeof withUserContext>[1]>[0]
 ): Promise<string> {
@@ -70,6 +75,16 @@ function defaultValidUntil(): string {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * ขั้น ③ (Customer Quotation PDF): โหลดหรือสร้างร่างใบเสนอราคาลูกค้า (v1)
+ *
+ * กฎความปลอดภัยและความถูกต้อง:
+ * 1. ต้องผ่านการอนุมัติราคาจากขั้น ② (`selling_rates.status === 'Approved'`) ก่อนจึงจะเปิดขั้น ③ ได้
+ * 2. คัดลอกเฉพาะรายการขายฝั่ง Revenue เข้าสู่ตาราง `quotations` / `quotation_versions` / `quotation_items`
+ *    โดยตัดต้นทุน Agent, กำไร, และ Margin ออกทั้งหมด (Isolated Customer Domain)
+ * 3. เมื่อกดบันทึกส่งลูกค้าแล้ว (`status = 'Sent'`) เวอร์ชันนั้นจะล็อกแก้ไม่ได้ (Immutable)
+ *    หากต้องการปรับราคาต้องสร้าง Revision ใหม่ (v2, v3, ...) เพื่อเก็บประวัติครบถ้วน
+ */
 export async function getOrInitQuotationWorkspace(user: AuthUser, shipmentId: string) {
   if (!hasPermission(user.role, 'shipments:read')) {
     throw new Error('FORBIDDEN');
@@ -304,6 +319,13 @@ export async function getOrInitQuotationWorkspace(user: AuthUser, shipmentId: st
   };
 }
 
+/**
+ * แก้ไขร่างใบเสนอราคาลูกค้า (Update Quotation Draft):
+ * - ตรวจสอบเงื่อนไข Immutability: แก้ไขได้เฉพาะใบเสนอราคาที่สถานะเป็น `Draft` เท่านั้น
+ *   หากสถานะเป็น `Sent` (ส่งลูกค้าแล้ว) จะไม่อนุญาตให้แก้ไขโดยตรง (ต้องกดสร้าง Revision ใหม่แทน)
+ * - คำนวณยอด Subtotal, ส่วนลด, VAT 7% และ Grand Total ด้วย decimal.js
+ * - เขียนทับรายการสินค้า (`quotation_items`) ในเวอร์ชันปัจจุบันและบันทึก Audit Log
+ */
 export async function updateQuotationDraft(
   user: AuthUser,
   quotationId: string,
@@ -419,6 +441,12 @@ export async function updateQuotationDraft(
   });
 }
 
+/**
+ * บันทึกว่าส่งใบเสนอราคาให้ลูกค้าแล้ว (Mark Quotation Sent):
+ * - เปลี่ยนสถานะของใบเสนอราคาและเวอร์ชันปัจจุบันเป็น `Sent`
+ * - บันทึกช่องทางการส่ง (Email, LINE, Chat, Handover) และผู้รับ
+ * - เมื่อส่งแล้ว เวอร์ชันนี้จะกลายเป็น Immutable ทันที และความคืบหน้าของงานจะเปลี่ยนเป็น "เสร็จสมบูรณ์ 3/3"
+ */
 export async function markQuotationSent(
   user: AuthUser,
   quotationId: string,
@@ -484,6 +512,12 @@ export async function markQuotationSent(
   });
 }
 
+/**
+ * สร้างเวอร์ชันใหม่ของใบเสนอราคา (Create Quotation Revision เช่น v2, v3, ...):
+ * - รักษาประวัติเดิมแบบ Immutable: เปลี่ยนสถานะเวอร์ชันเดิมเป็น `Superseded` (ไม่ลบ ไม่แก้ทับ)
+ * - รันเลขเวอร์ชันถัดไป (`currentVersion + 1`) และสร้างร่างใหม่สถานะ `Draft`
+ * - คัดลอกรายการสินค้าเดิมทั้งหมดมาเป็นค่าเริ่มต้นในเวอร์ชันใหม่ พร้อมบันทึกสรุปเหตุผลการแก้ไข (`changeSummary`)
+ */
 export async function createQuotationRevision(
   user: AuthUser,
   quotationId: string,

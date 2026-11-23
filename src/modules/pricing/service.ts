@@ -24,6 +24,15 @@ import type {
   UpdateSellingRateInput,
 } from './schema';
 
+/**
+ * ขั้น ② (Sale Price Approve Request): โหลดหรือสร้าง Draft ใบขออนุมัติราคาขายอัตโนมัติ
+ *
+ * ลอจิกสำคัญ:
+ * - หากยังไม่ได้เลือก Winning Agent ในขั้น ① -> คืน `sellingRate: null` เพื่อให้หน้าจอแนะนำให้กลับไปเลือกก่อน
+ * - หากเลือก Agent แล้วแต่ยังไม่เคยเปิดขั้น ② -> สร้าง Draft ใน `selling_rates` + `selling_rate_charges` อัตโนมัติ
+ *   โดยดึงต้นทุนจาก Agent ที่เลือกมาใส่ฝั่ง COST และเว้นฝั่ง REVENUE เป็น null (Zero Auto-Markup)
+ * - รองรับ Maker-Checker: เมื่อเปิด `REQUIRE_AUTH="true"` ผู้ขออนุมัติกับผู้อนุมัติต้องเป็นคนละสิทธิ์/คนละคน
+ */
 export async function getOrInitSellingRateWorkspace(user: AuthUser, shipmentId: string) {
   if (!hasPermission(user.role, 'shipments:read')) {
     throw new Error('FORBIDDEN');
@@ -134,7 +143,9 @@ export async function getOrInitSellingRateWorkspace(user: AuthUser, shipmentId: 
       vatPercent: 7,
     });
 
-    const isLcl = containers.some((c) => c.containerType.toUpperCase() === 'LCL');
+    const lclContainer = containers.find((c) => c.containerType.toUpperCase() === 'LCL');
+    const isLcl = Boolean(lclContainer);
+    const lclVolume = lclContainer && Number(lclContainer.quantity) > 0 ? Number(lclContainer.quantity) : 1;
     const isAutoCompareTitle = shipment.customerName.startsWith('เปรียบเทียบ ');
     const defaultDocMeta = {
       jobNo: '',
@@ -142,9 +153,12 @@ export async function getOrInitSellingRateWorkspace(user: AuthUser, shipmentId: 
       consigneeName: isAutoCompareTitle ? '' : shipment.customerName,
       agentName: selectedRateRow.agentName,
       commodity: shipment.commodityDescription ?? '',
-      volume: containers.map((c) => `${c.quantity}×${c.containerType}`).join(' + ') || '',
+      volume:
+        containers
+          .map((c) => (c.containerType === 'LCL' ? `${c.quantity} CBM (LCL)` : `${c.quantity}×${c.containerType}`))
+          .join(' + ') || '',
       weightKgs: '',
-      measureCbm: '',
+      measureCbm: isLcl && lclVolume > 0 ? String(lclVolume) : '',
       mode: isLcl ? 'Sea (LCL)' : 'Sea (FCL)',
       term: shipment.incoterm ?? 'FOB',
       pol: shipment.polPortCode,
@@ -203,7 +217,12 @@ export async function getOrInitSellingRateWorkspace(user: AuthUser, shipmentId: 
               revenueWhtPercent: isVat ? '3.00' : '0.00',
               revenueAmountUsd: null,
               chargeUnit: c.chargeUnit,
-              quantity: '1.00',
+              quantity:
+                isLcl &&
+                lclVolume > 1 &&
+                (c.chargeUnit === 'PER_CBM' || c.chargeUnit === 'PER_WM' || c.chargeUnit === 'PER_RT')
+                  ? lclVolume.toFixed(2)
+                  : '1.00',
               isVatApplicable: isVat,
               displayOrder: c.displayOrder ?? (idx + 1) * 10,
             };
@@ -272,6 +291,13 @@ export async function getOrInitSellingRateWorkspace(user: AuthUser, shipmentId: 
   };
 }
 
+/**
+ * บันทึกร่างราคาขาย (Save Selling Rate Draft):
+ * - คำนวณยอดขาย ยอดกำไร Markup % และ Gross Margin % ด้วย decimal.js (Zero Auto-Markup)
+ * - กฎความปลอดภัยของสิทธิ์: หากแก้ไขราคาขายในงานที่เคยได้รับการอนุมัติแล้ว (`Approved`) หรือขออนุมัติค้างอยู่
+ *   สถานะจะถูก Reset กลับเป็น `Draft` ทันที และยกเลิกสิทธิ์การอนุมัติเดิม (Revoke Prior Approval)
+ * - ซิงค์ข้อมูลลูกค้า/ท่าเรือต้นทาง-ปลายทางจาก `documentMeta` กลับไปยังตาราง `shipments` เพื่อให้ขั้น ③ ดึงไปใช้อัตโนมัติ
+ */
 export async function updateSellingRateForUser(
   user: AuthUser,
   sellingRateId: string,
@@ -418,6 +444,11 @@ export async function updateSellingRateForUser(
   });
 }
 
+/**
+ * ส่งคำขออนุมัติราคาขายไปยังผู้จัดการ (Request Sale Price Approval):
+ * - ตรวจสอบว่าต้องมีราคาขายที่กรอกแล้ว (ยอดขายสุทธิ > 0)
+ * - เปลี่ยนสถานะเป็น `Pending_Approval` และบันทึกวันเวลาที่ส่งขออนุมัติ
+ */
 export async function requestSellingRateApproval(
   user: AuthUser,
   sellingRateId: string,
@@ -485,6 +516,13 @@ export async function requestSellingRateApproval(
   });
 }
 
+/**
+ * ผู้อนุมัติทำการอนุมัติราคาขาย (Approve Sale Price):
+ * - ตรวจสอบสิทธิ์ `pricing:approve` (เฉพาะ Sales Manager หรือ Management)
+ * - บังคับกฎ Maker-Checker (เมื่อ `REQUIRE_AUTH="true"`): ผู้ขออนุมัติ (`createdBy`) และผู้อนุมัติ (`user.id`) ต้องไม่ใช่คนเดียวกัน
+ * - ถ่ายภาพรวมข้อมูล (Snapshot Data) ของราคาขายและรายการต้นทุนทุกรายการ ณ วินาทีที่อนุมัติไว้ใน JSON
+ *   เพื่อเป็นหลักฐานอ้างอิงที่ไม่สามารถแก้ไขได้อีก (Immutable Approval Evidence)
+ */
 export async function approveSellingRate(user: AuthUser, sellingRateId: string) {
   if (!hasPermission(user.role, 'pricing:approve')) {
     throw new Error('FORBIDDEN');
@@ -568,6 +606,12 @@ export async function approveSellingRate(user: AuthUser, sellingRateId: string) 
   });
 }
 
+/**
+ * ส่งคืนใบขออนุมัติราคาขายให้ฝ่ายขายกลับไปแก้ไข (Return / Reject Sale Price):
+ * - ตรวจสอบว่าใบราคาขายอยู่ในสถานะ `Pending_Approval`
+ * - บันทึกเหตุผลการตีกลับ (`rejectionReason`) และเปลี่ยนสถานะเป็น `Returned`
+ * - บันทึกประวัติและเหตุผลใน Audit Log
+ */
 export async function returnSellingRate(
   user: AuthUser,
   sellingRateId: string,

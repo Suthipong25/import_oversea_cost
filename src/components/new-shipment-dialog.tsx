@@ -226,17 +226,22 @@ export function NewShipmentDialog() {
                           </option>
                         ))}
                       </select>
-                      <input
-                        aria-label={`Container quantity ${idx + 1}`}
-                        type="number"
-                        min={1}
-                        max={999}
-                        value={row.quantity}
-                        onChange={(e) =>
-                          updateContainer(idx, { quantity: Math.max(1, Number(e.target.value) || 1) })
-                        }
-                        className="w-24 px-3 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--surface-card)] text-right tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                      />
+                      <div className="relative flex items-center">
+                        <input
+                          aria-label={`Container quantity ${idx + 1}`}
+                          type="number"
+                          min={1}
+                          max={999}
+                          value={row.quantity}
+                          onChange={(e) =>
+                            updateContainer(idx, { quantity: Math.max(1, Number(e.target.value) || 1) })
+                          }
+                          className="w-28 px-3 py-2 pr-12 rounded-lg border border-[var(--border-default)] bg-[var(--surface-card)] text-right tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                        />
+                        <span className="absolute right-2.5 text-[11px] text-[var(--text-muted)] pointer-events-none font-medium">
+                          {row.containerType === 'LCL' ? 'CBM' : 'ตู้'}
+                        </span>
+                      </div>
                       <button
                         type="button"
                         aria-label={`Remove container row ${idx + 1}`}
@@ -249,6 +254,11 @@ export function NewShipmentDialog() {
                     </div>
                   ))}
                 </div>
+                {containers.some((c) => c.containerType === 'LCL') && (
+                  <p className="text-[11px] text-[var(--accent)] font-medium pt-1">
+                    💡 งาน LCL: รายการที่คิดราคา per CBM / W/M / R/T จะนำปริมาตร (CBM) ไปคูณเพื่อได้ Cost สุทธิให้อัตโนมัติ (เช่น 2 CBM × 2, 4 CBM × 4)
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">

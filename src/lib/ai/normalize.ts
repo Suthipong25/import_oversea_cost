@@ -30,8 +30,13 @@ function normalizeKey(input: string): string {
 }
 
 /**
- * Matches a raw charge name extracted from a rate document against
- * confirmed aliases first, then catalog names/codes.
+ * จับคู่ชื่อค่าใช้จ่ายดิบจากใบราคา Agent (เช่น "Dest THC", "40'HC") เข้ากับหัวข้อมาตรฐาน 38 รายการ
+ * เรียงลำดับความแม่นยำ 4 ขั้น:
+ *   1) ตรงกับคำย่อ (Alias) แบบ Exact Match
+ *   2) ตรงกับชื่อภาษาอังกฤษหรือรหัสใน Master Catalog แบบ Exact Match
+ *   3) ค้นหาคำย่อแบบ Substring (เรียงจากคำยาวไปสั้นเพื่อกันคำสั้นอย่าง "BL" จับผิดแถว)
+ *   4) ค้นหาชื่อใน Master Catalog แบบ Substring (เฉพาะชื่อยาว >= 4 ตัวอักษร)
+ * หากไม่เจอเลยจะคืน null เพื่อแสดงเป็นรายการ Unmapped ให้ผู้ใช้จับคู่เองได้
  */
 export function matchChargeToCatalog(
   rawChargeName: string,
@@ -84,7 +89,8 @@ export function matchChargeToCatalog(
 }
 
 /**
- * Deterministic financial summation using decimal.js (never JavaScript floats).
+ * รวมยอด WHT / VAT / THB / USD ของรายการค่าใช้จ่ายทั้งหมดในใบราคาด้วย decimal.js
+ * ข้ามแถวที่สถานะเป็น NOT_APPLICABLE / INCLUDED / MISSING เพื่อไม่ให้นับซ้ำหรือคลาดเคลื่อน
  */
 export function sumRateCharges(
   charges: Array<{

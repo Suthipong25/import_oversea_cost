@@ -20,6 +20,15 @@ import type {
   SelectWinningAgentInput,
 } from './schema';
 
+/**
+ * ขั้น ① -> ขั้น ②: บันทึกการเลือก Agent ผู้ชนะ (Winning Agent) สำหรับงานเปรียบเทียบ
+ *
+ * ขั้นตอนหลัก:
+ * 1. ตรวจสอบสิทธิ์และเช็กว่างานนี้มีใบราคาที่ Verified แล้วระหว่าง 2–5 เจ้า และเจ้าที่เลือกต้อง Verified แล้ว
+ * 2. ปิดสถานะ Active ของรอบเปรียบเทียบเดิม (Supersede) แล้วสร้าง Snapshot ใหม่ใน `cost_comparisons`
+ * 3. คำนวณและล็อกยอดรวม WHT/VAT/THB/USD + Scope Completeness ของทุกเจ้าลง `cost_comparison_items`
+ * 4. บันทึก Audit Log เพื่อให้ตรวจสอบย้อนหลังได้ว่าใครเลือก Agent ไหนและด้วยเหตุผลอะไร
+ */
 export async function selectWinningAgentForShipment(
   user: AuthUser,
   shipmentId: string,
@@ -129,6 +138,12 @@ export async function selectWinningAgentForShipment(
   });
 }
 
+/**
+ * แมปรายการค่าใช้จ่ายที่ AI สรุปไม่ได้ (Unmapped Charge) เข้าสู่หัวข้อใน Master Catalog:
+ * - หากหัวข้อปลายทางมีอยู่ในใบราคานี้แล้ว: รวมยอดตัวเลขเข้าแถวเดิมและลบแถวซ้ำออก (Deduplication Merge)
+ * - หากยังไม่มี: กำหนด chargeCatalogId และหมวดหมู่ตามหัวข้อมาตรฐาน
+ * - หากติ๊ก `learnAlias`: บันทึกคำย่อลงตาราง `charge_aliases` เพื่อให้ระบบจดจำในครั้งถัดไป
+ */
 export async function mapUnmappedChargeForUser(
   user: AuthUser,
   rateRecordId: string,
@@ -222,6 +237,13 @@ export async function mapUnmappedChargeForUser(
   });
 }
 
+/**
+ * แปลงค่าใช้จ่ายที่เป็นสกุล USD ในใบราคาของ Agent เป็นสกุล THB (Explicit FX Conversion):
+ * - รองรับสูตรปัดเศษ: `CEIL_100` (ปัดขึ้นหลักร้อยของ Perkin) หรือ `EXACT` (ปัดทศนิยม 2 ตำแหน่ง)
+ * - หากระบุ `overwriteExisting`: จะแปลงทับค่า THB เดิมทั้งหมด, หากไม่ระบุ: จะแปลงเฉพาะรายการที่ THB ยังว่างอยู่
+ * - บันทึกอัตราแลกเปลี่ยนที่ใช้ลงคอลัมน์ `fxRateUsed` เพื่อให้ตรวจสอบที่มาได้เสมอ
+ * - หากใบราคาเดิมอยู่ในสถานะ `Verified`: การแปลงค่า FX ถือเป็นการแก้ตัวเลขต้นทุน จึงดึงสถานะกลับเป็น `Awaiting_Verification`
+ */
 export async function applyExplicitFxToRate(
   user: AuthUser,
   rateRecordId: string,

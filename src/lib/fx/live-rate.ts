@@ -191,8 +191,14 @@ async function fetchFreshSnapshot(): Promise<LiveFxSnapshot> {
 }
 
 /**
- * Returns the real-time USD -> THB exchange rate (60s in-memory cache).
- * Automatically falls back across Yahoo Finance -> ExchangeRate-API -> Frankfurter -> PostgreSQL.
+ * ดึงอัตราแลกเปลี่ยน USD -> THB แบบ Real-time พร้อมแคชในหน่วยความจำ 60 วินาที
+ * และรวมคำขอที่เข้ามาพร้อมกัน (inflightPromise) เพื่อไม่ให้ยิง API ภายนอกซ้ำซ้อน
+ *
+ * ลำดับ Fallback อัตโนมัติ (Timeout แหล่งละ 4 วินาที, กรองค่าผิดปกติให้อยู่ในช่วง 15–80 บาท):
+ *   1) Yahoo Finance (THB=X รายนาที — Real-time)
+ *   2) ExchangeRate-API (open.er-api.com)
+ *   3) Frankfurter (ECB)
+ *   4) PostgreSQL (exchange_rates ล่าสุดที่เคยบันทึกไว้) -> ค่าสำรอง 33.0000
  */
 export async function getLiveUsdToThbRate(options?: {
   forceRefresh?: boolean;

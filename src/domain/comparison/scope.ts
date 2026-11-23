@@ -17,9 +17,11 @@ const SCOPE_LABELS: Record<ScopeGroupKey, string> = {
 };
 
 /**
- * Evaluates whether an Agent's rate covers all major cost scopes.
- * Prevents the "Partial Quote Trap" where an agent missing Ocean Freight
- * appears artificially cheapest.
+ * ประเมินความครบถ้วนของหมวดค่าใช้จ่าย (4 หมวดหลัก) ในใบราคาของ Agent แต่ละเจ้า:
+ * Ocean Freight / Origin Pickup / Dest Port / TH Local & Transport
+ *
+ * เหตุผลทางธุรกิจ: ป้องกันกับดัก "Partial Quote Trap" ที่ Agent บางเจ้าส่งราคามาไม่ครบทุกหมวด
+ * (เช่น ไม่ได้ใส่ค่าระวางเรือ Ocean) ทำให้ยอดรวมดูถูกที่สุดแบบหลอกตา
  */
 export function evaluateAgentScope(
   charges: Array<{
@@ -32,6 +34,7 @@ export function evaluateAgentScope(
   const populated = new Set<ScopeGroupKey>();
 
   for (const c of charges) {
+    // ถือว่าหมวดนี้ "มีข้อมูลแล้ว" หากระบุว่ารวมแล้ว (INCLUDED), ไม่คิด (NOT_APPLICABLE) หรือมีตัวเลข > 0
     const hasVal =
       c.cellStatus === 'INCLUDED' ||
       c.cellStatus === 'NOT_APPLICABLE' ||
@@ -71,8 +74,9 @@ export function evaluateAgentScope(
 }
 
 /**
- * Returns the rate ID with the lowest total THB strictly among
- * Verified AND Scope-Complete rates (never crowns an incomplete quote).
+ * หา ID ของ Agent ที่ยอดรวม THB ต่ำที่สุดเพื่อติดป้าย "ต่ำสุด"
+ * กฎ: คัดเฉพาะเจ้าที่ Verified และครบทั้ง 4 หมวดเท่านั้น (และต้องมีคู่เทียบอย่างน้อย 2 เจ้า)
+ * เพื่อไม่ให้ติดป้าย "ต่ำสุด" ให้ใบราคาที่ขาดหมวดสำคัญ
  */
 export function findLowestComparableRateId(
   rates: Array<{
@@ -101,8 +105,10 @@ export function findLowestComparableRateId(
 }
 
 /**
- * Explicit USD -> THB conversion using decimal.js (never silent).
- * Supports EXACT (2 decimals) or CEIL_100 (Perkin's upward rounding to nearest 100 THB).
+ * แปลงเงิน USD -> THB ด้วย decimal.js (หลีกเลี่ยงความคลาดเคลื่อนของ floating-point)
+ * - EXACT: คูณตามอัตราแลกเปลี่ยนแล้วปัดทศนิยม 2 ตำแหน่ง
+ * - CEIL_100: สูตรปัดขึ้นหลักร้อยของ Perkin เช่น 75,735 -> 75,800.0000
+ * คืนค่าเป็นสตริงทศนิยม 4 ตำแหน่งให้ตรงกับคอลัมน์ numeric(18,4) ใน PostgreSQL
  */
 export function convertUsdToThb(
   amountUsd: string | number,

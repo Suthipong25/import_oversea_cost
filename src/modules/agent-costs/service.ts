@@ -57,6 +57,10 @@ export interface StandaloneAgentCostItem {
   createdAt: string;
 }
 
+/**
+ * ดึงรายการ Cost Agent ในคลังกลางทั้งหมด (`shipment_id IS NULL`) สูงสุด 150 รายการล่าสุด
+ * พร้อม Master Catalog, รายชื่อ Supplier, อัตราแลกเปลี่ยน และยอดรวม WHT/VAT/THB/USD
+ */
 export async function listStandaloneAgentCosts(user: AuthUser) {
   if (!hasPermission(user.role, 'shipments:read')) {
     throw new Error('FORBIDDEN');
@@ -165,6 +169,12 @@ export async function listStandaloneAgentCosts(user: AuthUser) {
   };
 }
 
+/**
+ * บันทึกใบราคา Agent เข้าสู่คลังกลาง (Standalone Agent Cost Library):
+ * - สามารถอัปโหลดไฟล์รูปภาพ/PDF หรือวางข้อความแชต เพื่อให้ AI สกัดรายการค่าใช้จ่ายอัตโนมัติ
+ * - หากมีรายการที่มีเฉพาะราคา USD จะแปลงเป็น THB ด้วยสูตร `CEIL_100` ของ Perkin ให้ทันที
+ * - บันทึกเป็นรายการส่วนกลาง (`shipment_id = null`) เพื่อให้สามารถนำไปติ๊กเลือกสร้างงานเปรียบเทียบในอนาคตได้
+ */
 export async function createStandaloneAgentCost(
   user: AuthUser,
   params: {
@@ -334,6 +344,11 @@ export async function createStandaloneAgentCost(
   });
 }
 
+/**
+ * แก้ไขข้อมูลส่วนหัว (Metadata) ของรายการ Cost Agent ในคลังกลาง:
+ * - ปรับปรุงชื่อ Agent, รูปแบบขนส่ง (FCL/LCL), ท่าเรือต้นทาง-ปลายทาง, และข้อความสรุปตู้
+ * - ซิงค์ชื่อ Agent ไปยัง `source_documents.supplierId` ที่เกี่ยวข้อง
+ */
 export async function updateStandaloneAgentCostMeta(
   user: AuthUser,
   rateRecordId: string,
@@ -438,9 +453,12 @@ function parseContainersFromSummary(modeType: string, summary: string) {
 }
 
 /**
- * Launches a real ① Compare Cost workspace from 2-5 selected Cost Agent library entries.
- * Clones the selected rates & charges into a new Shipment so the original Agent Cost Library
- * remains intact and reusable for future comparisons.
+ * ขั้น 0 -> ขั้น ①: สร้างงานเปรียบเทียบ (Shipment) จากรายการ Cost Agent ที่ผู้ใช้ติ๊กเลือก 2–5 เจ้า
+ *
+ * หลักการออกแบบ:
+ * - โคลน (Clone) ข้อมูล rate_records และ rate_charges จากคลังกลาง (`shipment_id IS NULL`)
+ *   เข้าไปผูกกับ Shipment ใหม่ เพื่อไม่ให้การแก้ไข/แปลง FX ในงานเปรียบเทียบไปกระทบต้นฉบับในคลัง Cost Agent
+ * - ทำทั้งหมดภายใน Transaction (`withUserContext`) เพื่อรับประกันความถูกต้องของข้อมูลและ Audit Log
  */
 export async function createComparisonFromAgentCosts(
   user: AuthUser,

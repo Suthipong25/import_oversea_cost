@@ -88,6 +88,13 @@ async function getDefaultInternalUser(): Promise<AuthUser | null> {
   };
 }
 
+/**
+ * อ่านผู้ใช้ปัจจุบันจาก Session Cookie (`perkin_session` เก็บเป็น SHA-256 hash ในตาราง sessions)
+ *
+ * โหมดการใช้งาน 2 แบบ (ควบคุมด้วย ENV `REQUIRE_AUTH`):
+ * - `REQUIRE_AUTH="true"`: บังคับ Login — หากไม่มี Cookie หรือหมดอายุจะคืน null
+ * - ค่าเริ่มต้น (ไม่ใช่ `"true"`): โหมดใช้งานภายในบริษัท — ใช้บัญชี admin@perkin.co.th ให้อัตโนมัติ
+ */
 export async function getCurrentUser(): Promise<AuthUser | null> {
   const cookieStore = await cookies();
   const rawToken = cookieStore.get(SESSION_COOKIE_NAME)?.value;

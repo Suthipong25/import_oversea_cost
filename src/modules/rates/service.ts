@@ -32,6 +32,14 @@ import {
 import { findOrCreateAgentByName } from '@/modules/suppliers/service';
 import type { CopyBaselineRowInput, CreateCatalogSubjectInput, UpsertRateChargeInput } from './schema';
 
+/**
+ * โหลดข้อมูล Workspace สำหรับตารางเปรียบเทียบราคาขั้น ① (Compare Cost Workspace):
+ * - ตรวจสอบสิทธิ์การเข้าถึงงาน (พนักงานขายทั่วไปดูได้เฉพาะงานที่ได้รับมอบหมาย)
+ * - ดึงข้อมูลงาน, ตู้สินค้า, Master Catalog, รายชื่อ Agent, อัตราแลกเปลี่ยนปัจจุบัน และ Timeline
+ * - ใช้ Batch Query (`inArray`) ดึง `rateCharges` และ `sourceDocuments` เพื่อหลีกเลี่ยง N+1 Query
+ * - คำนวณยอดรวม WHT/VAT/THB/USD (`sumRateCharges`), ตรวจสอบความครบถ้วน 4 หมวด (`evaluateAgentScope`),
+ *   และคำนวณหา Agent ที่ราคาต่ำสุดและมีข้อมูลครบถ้วน (`findLowestComparableRateId`)
+ */
 export async function getShipmentWorkspaceData(user: AuthUser, shipmentId: string) {
   if (!hasPermission(user.role, 'shipments:read')) {
     throw new Error('FORBIDDEN');
@@ -162,6 +170,7 @@ export async function getShipmentWorkspaceData(user: AuthUser, shipmentId: strin
         amountThb: c.amountThb,
         amountUsd: c.amountUsd,
         sourceTextSnippet: c.sourceTextSnippet,
+        chargeUnit: c.chargeUnit,
       })),
       totals,
       scope,
@@ -198,6 +207,15 @@ export interface IngestRateParams {
   pastedText?: string | null;
 }
 
+/**
+ * นำเข้าใบราคาของ Agent เข้าสู่งานเปรียบเทียบ (Ingest Rate for Shipment):
+ * 1. ตรวจสอบเงื่อนไข: เปรียบเทียบได้สูงสุด 5 Agent ต่องานเท่านั้น
+ * 2. ตรวจสอบไฟล์อัปโหลดด้วย Magic Bytes (PDF/Image) หรือตรวจสอบข้อความที่ Paste
+ * 3. ป้องกันการอัปโหลดไฟล์/ข้อความซ้ำในงานเดียวกันโดยเปรียบเทียบ SHA-256 Hash
+ * 4. ค้นหาหรือสร้าง Agent อัตโนมัติ (`COST <ชื่อ>`)
+ * 5. ส่งเข้า Extraction Pipeline (unpdf -> Gemini/OpenAI Vision -> Local Regex Fallback)
+ * 6. จับคู่รายการค่าใช้จ่ายเข้ากับ Master Catalog และบันทึกเข้าสู่ฐานข้อมูลภายใน Transaction
+ */
 export async function ingestRateForShipment(user: AuthUser, params: IngestRateParams) {
   if (!hasPermission(user.role, 'rates:ingest')) {
     throw new Error('FORBIDDEN');
@@ -269,13 +287,17 @@ export async function ingestRateForShipment(user: AuthUser, params: IngestRatePa
 
   const agent = await findOrCreateAgentByName(user, params.agentName);
 
-  const [catalogRows, aliasRows, fxSnapshot] = await Promise.all([
+  const [catalogRows, aliasRows, fxSnapshot, containers] = await Promise.all([
     db.select().from(chargeCatalog).where(eq(chargeCatalog.isActive, true)),
     db.select().from(chargeAliases),
     getLiveUsdToThbRate(),
+    db.select().from(shipmentContainers).where(eq(shipmentContainers.shipmentId, params.shipmentId)),
   ]);
 
   const fxRateNum = fxSnapshot.rate;
+
+  const lclContainer = containers.find((c) => c.containerType.toUpperCase() === 'LCL');
+  const volumeCbm = lclContainer && Number(lclContainer.quantity) > 0 ? Number(lclContainer.quantity) : null;
 
   // Execute AI / unpdf / deterministic extraction pipeline
   const extraction = await runExtractionPipeline({
@@ -284,6 +306,7 @@ export async function ingestRateForShipment(user: AuthUser, params: IngestRatePa
     fileBuffer,
     pastedText: params.pastedText ?? undefined,
     fxRateUsdToThb: fxRateNum,
+    volumeCbm,
   });
 
   if (duplicateWarning) {
@@ -409,6 +432,17 @@ export async function ingestRateForShipment(user: AuthUser, params: IngestRatePa
   });
 }
 
+/**
+ * อัปเดตหรือเพิ่มข้อมูลในแต่ละช่อง (Cell) ของตารางเปรียบเทียบราคา:
+ * - รองรับค่าตัวเลข THB/USD, ภาษี WHT/VAT หรือสถานะไม่คิดค่าใช้จ่าย ('-' / NOT_APPLICABLE)
+ * - หากผู้ใช้ลบตัวเลขออกจนว่างเปล่า จะลบแถวออกจากฐานข้อมูลอัตโนมัติ (Blank Row Cleanup)
+ * - กฎ Finite State Machine (FSM Cascade) ที่สำคัญมาก:
+ *   หากใบราคานี้เคยได้รับการยืนยันแล้ว (`Verified`) การแก้ไขตัวเลขจะดึงสถานะกลับเป็น `Awaiting_Verification` ทันที
+ *   และหากใบราคานี้เคยถูกเลือกเป็น Winning Agent ในขั้น ① หรือเคยขออนุมัติราคาขายในขั้น ② แล้ว
+ *   ระบบจะเปลี่ยนสถานะของรอบเปรียบเทียบและใบขออนุมัติราคาขายเป็น `Needs_Review` ทันที
+ *   พร้อมยกเลิกการอนุมัติเดิม เพื่อป้องกันการแอบแก้ไขตัวเลขต้นทุนหลังจากผ่านการอนุมัติไปแล้ว
+ * - จดจำคำย่อ (Alias Learning): หากเลือก `learnAlias` ระบบจะจำชื่อที่ Agent เรียกเข้า Master Catalog เพื่อให้คราวหน้าจับคู่อัตโนมัติ
+ */
 export async function upsertRateChargeForUser(
   user: AuthUser,
   rateRecordId: string,
@@ -567,6 +601,12 @@ export async function upsertRateChargeForUser(
   });
 }
 
+/**
+ * ยืนยันความถูกต้องของใบราคา (Verify Rate):
+ * - เปลี่ยนสถานะของใบราคาเป็น `Verified` และบันทึกผู้ตรวจสอบ (`verifiedBy`) พร้อมวันเวลา
+ * - เปลี่ยนสถานะทุกแถวค่าใช้จ่ายของใบราคานี้เป็น `isVerified = true`
+ * - ใบราคาที่ Verified แล้วเท่านั้นจึงจะมีสิทธิ์ถูกเลือกเป็น Winning Agent หรือนำไปขออนุมัติราคาขายต่อได้
+ */
 export async function verifyRateRecordForUser(user: AuthUser, rateRecordId: string) {
   if (!hasPermission(user.role, 'rates:verify')) {
     throw new Error('FORBIDDEN');
@@ -610,6 +650,9 @@ export async function verifyRateRecordForUser(user: AuthUser, rateRecordId: stri
   });
 }
 
+/**
+ * ลบใบราคาของ Agent ออกจากงาน พร้อมบันทึกประวัติใน Audit Log
+ */
 export async function deleteRateRecordForUser(user: AuthUser, rateRecordId: string) {
   if (!hasPermission(user.role, 'rates:ingest')) {
     throw new Error('FORBIDDEN');
@@ -637,6 +680,11 @@ export async function deleteRateRecordForUser(user: AuthUser, rateRecordId: stri
   });
 }
 
+/**
+ * คัดลอกค่าใช้จ่ายแถวเดียวกันไปยัง Agent ทุกเจ้าในงาน (Copy Row to All Agents):
+ * ออกแบบมาเพื่อความสะดวกสำหรับค่าใช้จ่ายที่เป็นอัตราคงที่เดียวกันทุกเจ้า (เช่น ค่าพิธีการศุลกากรไทย หรือค่ารถบรรทุกในประเทศ)
+ * ช่วยให้ไม่ต้องเสียเวลากรอกตัวเลขซ้ำๆ ในทุกคอลัมน์ของ Agent
+ */
 export async function copyRowAcrossShipmentRates(
   user: AuthUser,
   shipmentId: string,
@@ -719,6 +767,11 @@ export async function copyRowAcrossShipmentRates(
   });
 }
 
+/**
+ * สร้างหัวข้อค่าใช้จ่ายใหม่ใน Master Catalog:
+ * - รันลำดับการแสดงผล (displayOrder) ต่อยอดอัตโนมัติ (+10)
+ * - บันทึกคำย่อหรือคำพ้องรูป (Aliases) ในรูปแบบตัวพิมพ์ใหญ่ (UPPERCASE) เพื่อใช้ในการจับคู่ AI อัตโนมัติ
+ */
 export async function createCatalogSubjectForUser(
   user: AuthUser,
   input: CreateCatalogSubjectInput
@@ -780,6 +833,9 @@ export async function createCatalogSubjectForUser(
   });
 }
 
+/**
+ * แก้ไขหัวข้อค่าใช้จ่ายใน Master Catalog (ชื่อภาษาอังกฤษ, ภาษาไทย, หมวด, WHT %, Aliases)
+ */
 export async function updateCatalogSubjectForUser(
   user: AuthUser,
   subjectId: string,
@@ -840,6 +896,12 @@ export async function updateCatalogSubjectForUser(
   });
 }
 
+/**
+ * ลบหัวข้อค่าใช้จ่ายออกจาก Master Catalog อย่างปลอดภัย (Preserve Historical Records):
+ * - ปลดการเชื่อมโยง FK ในตาราง `rate_charges` และ `selling_rate_charges` ให้เป็น `null` ก่อนลบ
+ *   เพื่อให้ใบราคาและใบเสนอราคาในอดีตยังคงแสดงชื่อข้อความเดิม (`rawChargeName`) ได้อย่างสมบูรณ์
+ * - ลบคำย่อใน `charge_aliases` แล้วจึงลบแถวใน `charge_catalog`
+ */
 export async function deleteCatalogSubjectForUser(user: AuthUser, subjectId: string) {
   if (!hasPermission(user.role, 'rates:verify')) {
     throw new Error('FORBIDDEN');

@@ -6,10 +6,16 @@ import { hasPermission } from '@/lib/auth/rbac';
 import type { AuthUser } from '@/lib/auth/session';
 import type { CreateSupplierInput } from './schema';
 
+/**
+ * ดึงรายชื่อ Supplier / Agent ทั้งหมดที่เปิดใช้งานอยู่ เรียงตามตัวอักษร
+ */
 export async function listSuppliers() {
   return db.select().from(suppliers).orderBy(asc(suppliers.name));
 }
 
+/**
+ * บันทึกสร้าง Agent รายใหม่ พร้อมบันทึกประวัติใน Audit Log
+ */
 export async function createSupplierForUser(user: AuthUser, input: CreateSupplierInput) {
   if (!hasPermission(user.role, 'suppliers:manage')) {
     throw new Error('FORBIDDEN');
@@ -44,6 +50,12 @@ export async function createSupplierForUser(user: AuthUser, input: CreateSupplie
   });
 }
 
+/**
+ * ค้นหาหรือสร้าง Agent อัตโนมัติจากชื่อที่สกัดได้จากเอกสาร/แชต:
+ * 1. กำหนดรูปแบบชื่อให้ขึ้นต้นด้วย "COST " เสมอ (เช่น "COST MAERSK") เพื่อความเป็นระเบียบ
+ * 2. ค้นหาแบบ Case-Insensitive (ilike) ทั้งแบบมีและไม่มีคำนำหน้า "COST " เพื่อป้องกันการสร้างซ้ำ
+ * 3. หากยังไม่มีในระบบ จะสร้าง Supplier ใหม่ให้อัตโนมัติ
+ */
 export async function findOrCreateAgentByName(user: AuthUser, rawAgentName: string) {
   const trimmed = rawAgentName.trim();
   const displayName = trimmed.toUpperCase().startsWith('COST ') ? trimmed : `COST ${trimmed}`;
@@ -71,6 +83,12 @@ export async function findOrCreateAgentByName(user: AuthUser, rawAgentName: stri
   });
 }
 
+/**
+ * ลบ Agent ออกจากระบบอย่างปลอดภัย:
+ * - กฎความปลอดภัย: ตรวจสอบก่อนว่า Agent นี้เคยถูกผูกกับใบราคา (rate_records) ใดๆ หรือไม่
+ *   หากมีประวัติใช้งานอยู่ จะไม่อนุญาตให้ลบ (โยนข้อผิดพลาด 'SUPPLIER_IN_USE') เพื่อปกป้องความสมบูรณ์ของข้อมูลย้อนหลัง
+ * - ปลดการเชื่อมโยงใน source_documents.supplierId = null ก่อนลบ
+ */
 export async function deleteSupplierForUser(user: AuthUser, supplierId: string) {
   if (!hasPermission(user.role, 'suppliers:manage')) {
     throw new Error('FORBIDDEN');
@@ -115,6 +133,9 @@ export async function deleteSupplierForUser(user: AuthUser, supplierId: string) 
   });
 }
 
+/**
+ * อัปเดตข้อมูลของ Agent (ชื่อบริษัท, ผู้ติดต่อ, เบอร์โทร, อีเมล, ที่อยู่, โน้ต)
+ */
 export async function updateSupplierForUser(
   user: AuthUser,
   supplierId: string,

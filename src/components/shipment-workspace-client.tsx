@@ -46,6 +46,7 @@ export interface WorkspaceCharge {
   amountThb: string | null;
   amountUsd: string | null;
   sourceTextSnippet: string | null;
+  chargeUnit?: string | null;
 }
 
 export interface WorkspaceRate {
@@ -525,9 +526,14 @@ export function ShipmentWorkspaceClient(props: WorkspaceProps) {
                   key={c.id}
                   className="px-2.5 py-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)] font-medium tabular-nums"
                 >
-                  {c.quantity}×{c.containerType}
+                  {c.containerType === 'LCL' ? `${c.quantity} CBM (LCL)` : `${c.quantity}×${c.containerType}`}
                 </span>
               ))}
+              {props.containers.some((c) => c.containerType === 'LCL') && (
+                <span className="px-2.5 py-1 rounded-lg bg-[var(--accent-subtle)] text-[var(--accent)] text-xs font-semibold">
+                  📦 คำนวณตามปริมาตร (per CBM/RT × {props.containers.find((c) => c.containerType === 'LCL')?.quantity ?? 1})
+                </span>
+              )}
               <LiveFxBadge
                 initialRate={liveFxRate}
                 initialMeta={props.fxSnapshot}
@@ -1022,9 +1028,19 @@ export function ShipmentWorkspaceClient(props: WorkspaceProps) {
                           >
                             <td
                               className="py-1.5 px-3.5 font-medium truncate text-[var(--text-primary)]"
-                              title={sub.nameEn}
+                              title={`${sub.nameEn}${ch?.sourceTextSnippet ? ` (${ch.sourceTextSnippet})` : ''}`}
                             >
-                              {sub.nameEn}
+                              <div className="flex items-center gap-1.5 truncate">
+                                <span className="truncate">{sub.nameEn}</span>
+                                {ch?.chargeUnit && ['PER_CBM', 'PER_WM', 'PER_RT'].includes(ch.chargeUnit) && (
+                                  <span
+                                    title={ch.sourceTextSnippet ?? 'เรทคิดตามปริมาตร'}
+                                    className="px-1 py-0.5 text-[9px] rounded bg-[var(--accent-subtle)] text-[var(--accent)] font-mono font-semibold shrink-0"
+                                  >
+                                    {ch.chargeUnit === 'PER_CBM' ? '/CBM' : ch.chargeUnit === 'PER_WM' ? '/WM' : '/RT'}
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             {(
                               [

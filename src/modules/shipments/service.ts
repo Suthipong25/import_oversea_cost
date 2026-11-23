@@ -104,6 +104,15 @@ export async function createShipmentForUser(
   });
 }
 
+/**
+ * ลบงานเปรียบเทียบ (Shipment) พร้อมข้อมูลลูกทั้งหมดอย่างปลอดภัยใน Transaction เดียว
+ *
+ * กฎสิทธิ์:
+ * - เฉพาะ Admin / Sales Manager (`shipments:edit_all`) เท่านั้นที่ลบงานซึ่งส่งใบเสนอราคาแล้ว (`Sent`) ได้
+ * ลำดับการลบ (สำคัญมาก — ป้องกัน Foreign Key Violation):
+ *   quotations -> selling_rates -> cost_comparisons -> rate_records -> shipments
+ *   เพราะบางคอลัมน์ FK (`selling_rate_id`, `selected_rate_record_id`, `source_document_id`) ไม่ได้ตั้ง ON DELETE CASCADE
+ */
 export async function deleteShipmentForUser(user: AuthUser, shipmentId: string) {
   if (!hasPermission(user.role, 'shipments:create')) {
     throw new Error('FORBIDDEN');

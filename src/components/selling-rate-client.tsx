@@ -815,15 +815,26 @@ export function SellingRateClient(props: SellingRateWorkspaceProps) {
                     <tr key={idx} className="hover:bg-blue-50/30">
                       {/* DETAIL + inline WHT&VAT tag */}
                       <td className="border-x border-slate-900 border-b border-b-slate-200 px-2 py-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <input
-                            type="text"
-                            aria-label={`Detail ${idx + 1}`}
-                            value={line.description}
-                            onChange={(e) => updateLine(idx, { description: e.target.value })}
-                            placeholder="ชื่อรายการ..."
-                            className="w-full bg-transparent text-[11px] font-medium text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:bg-[var(--accent-soft)] px-1 rounded"
-                          />
+                        <div className="flex items-center justify-between gap-1.5">
+                          <div className="flex-1 flex items-center gap-1.5 min-w-0">
+                            <input
+                              type="text"
+                              aria-label={`Detail ${idx + 1}`}
+                              value={line.description}
+                              onChange={(e) => updateLine(idx, { description: e.target.value })}
+                              placeholder="ชื่อรายการ..."
+                              className="w-full bg-transparent text-[11px] font-medium text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:bg-[var(--accent-soft)] px-1 rounded"
+                            />
+                            {line.chargeUnit && ['PER_CBM', 'PER_WM', 'PER_RT'].includes(line.chargeUnit) && (
+                              <span
+                                title={`คิดตามปริมาตร ${Number(line.quantity) > 1 ? `(คูณ ${line.quantity})` : ''}`}
+                                className="px-1 py-0.5 text-[9px] rounded bg-blue-50 text-blue-700 border border-blue-200 font-mono font-bold shrink-0 print:border-0 print:bg-transparent"
+                              >
+                                {line.chargeUnit === 'PER_CBM' ? '/CBM' : line.chargeUnit === 'PER_WM' ? '/WM' : '/RT'}
+                                {Number(line.quantity) > 1 && `×${Number(line.quantity)}`}
+                              </span>
+                            )}
+                          </div>
                           <button
                             type="button"
                             onClick={() => toggleWhtVat(idx)}

@@ -48,8 +48,8 @@ export interface CustomerQuotationPdfPayload {
 }
 
 /**
- * Forbidden internal key fragments that MUST NEVER reach customer quotation PDFs.
- * Enforced both at runtime before PDF generation and in automated Vitest CI tests.
+ * รายชื่อคำต้องห้าม (ความลับภายในบริษัท) ที่ห้ามหลุดไปใน Payload ใบเสนอราคาลูกค้า (ขั้น ③) เด็ดขาด
+ * ระบบจะเรียก assertNoConfidentialFields() ตรวจแบบ Recursive ทุกครั้งก่อนสร้าง PDF และตรวจซ้ำใน Unit Test
  */
 const FORBIDDEN_CONFIDENTIAL_KEYS = [
   'cost',
@@ -68,6 +68,10 @@ const FORBIDDEN_CONFIDENTIAL_KEYS = [
   'selling_rate_id',
 ];
 
+/**
+ * ตรวจสอบ Object/Array ทุกชั้นแบบ Recursive หากพบคีย์ที่เกี่ยวข้องกับต้นทุน Agent หรือกำไร
+ * จะโยน Error ทันทีเพื่อป้องกันข้อมูลความลับรั่วไปยัง PDF ฝั่งลูกค้า
+ */
 export function assertNoConfidentialFields(payload: unknown, path = 'root'): void {
   if (payload === null || payload === undefined || typeof payload !== 'object') {
     return;
@@ -90,6 +94,10 @@ export function assertNoConfidentialFields(payload: unknown, path = 'root'): voi
   }
 }
 
+/**
+ * คำนวณยอดรวมฝั่งใบเสนอราคาลูกค้า (Subtotal, Discount, VAT 7%, Grand Total)
+ * คิดเฉพาะรายการขายที่แสดงให้ลูกค้าเห็นเท่านั้น — ไม่มีฟิลด์ต้นทุนหรือกำไรเข้ามาเกี่ยวข้อง
+ */
 export function computeQuotationTotals(params: {
   items: Array<{ quantity: string | number; unitPrice: string | number; isTaxable: boolean }>;
   discountAmount?: string | number | null;

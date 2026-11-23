@@ -13,7 +13,9 @@ export interface AuditEntry {
 }
 
 /**
- * Writes an immutable audit log entry inside the caller's database transaction.
+ * บันทึก Audit Log แบบ Immutable ภายใต้ Transaction เดียวกันกับคำสั่งงานหลัก
+ * เพื่อรับประกันว่าหากคำสั่งงานหลักล้มเหลว (Rollback) บันทึก Audit จะไม่ค้างหลงเหลือ
+ * และหากคำสั่งงานสำเร็จ บันทึกการเปลี่ยนแปลง (previousState / newState) จะถูกบันทึกไว้อย่างสมบูรณ์
  */
 export async function writeAuditLog(tx: DbTransaction, entry: AuditEntry): Promise<void> {
   await tx.insert(auditLogs).values({

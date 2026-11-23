@@ -29,10 +29,15 @@ function toDec(val: string | number | null | undefined): Decimal {
 }
 
 /**
- * Pure deterministic selling rate calculator using decimal.js.
- * - Never auto-adds markup; uses only Sales-entered selling amounts.
- * - Keeps Markup % and Gross Margin % strictly distinct:
- *   Example: cost 1,000, selling 1,200 -> profit 200, markup 20.00%, margin 16.67%.
+ * ตัวคำนวณราคาขายและกำไรสำหรับขั้น ② (Sale Price Approve Request) ด้วย decimal.js
+ *
+ * กฎสำคัญของระบบ:
+ * 1. ห้ามบวก Markup อัตโนมัติ (Zero Auto-Markup) — คำนวณจากราคาขายที่ Sales กรอกเองเท่านั้น
+ * 2. แยก Markup % และ Gross Margin % ชัดเจน:
+ *    - Markup % = (GP / Cost) × 100
+ *    - Gross Margin % = (GP / Net Selling Excl. VAT) × 100
+ *    ตัวอย่าง: ทุน 1,000 ขาย 1,200 -> กำไร 200 -> Markup = 20.00%, Margin = 16.67%
+ * 3. VAT 7% คิดเฉพาะรายการที่ติ๊ก isVatApplicable = true และเฉลี่ยส่วนลดตามสัดส่วนยอดที่เสีย VAT
  */
 export function calculateSellingRate(params: {
   lines: SellingChargeLineInput[];
@@ -49,6 +54,7 @@ export function calculateSellingRate(params: {
   let taxableSelling = new Decimal(0);
   let hasAnySellingPrice = false;
 
+  // รวมยอดต้นทุน (Cost), ยอดขายรวม (Revenue) และยอดขายเฉพาะรายการที่ต้องคิด VAT
   for (const line of params.lines) {
     const cost = toDec(line.costAmountThb);
     totalCost = totalCost.plus(cost);
@@ -63,20 +69,21 @@ export function calculateSellingRate(params: {
     }
   }
 
+  // ยอดขายสุทธิก่อน VAT และกำไรขั้นต้น (Gross Profit)
   const netSelling = Decimal.max(0, totalSelling.minus(discount));
   const grossProfit = netSelling.minus(totalCost);
 
-  // Markup % = (GP / Cost) * 100
+  // Markup % = (กำไรขั้นต้น / ต้นทุนรวม) × 100
   const markupPercent = totalCost.gt(0)
     ? grossProfit.dividedBy(totalCost).times(100)
     : new Decimal(0);
 
-  // Gross Margin % = (GP / Net Selling Excl. VAT) * 100
+  // Gross Margin % = (กำไรขั้นต้น / ยอดขายสุทธิก่อน VAT) × 100 (ใช้เทียบเกณฑ์ CONDITION >= 25%)
   const grossMarginPercent = netSelling.gt(0)
     ? grossProfit.dividedBy(netSelling).times(100)
     : new Decimal(0);
 
-  // Proportional discount adjustment on taxable subtotal before VAT
+  // หากมีส่วนลดรวม ให้หักส่วนลดออกจากฐานภาษี VAT ตามสัดส่วนของรายการที่เสีย VAT
   let netTaxable = taxableSelling;
   if (totalSelling.gt(0) && discount.gt(0) && taxableSelling.gt(0)) {
     const taxableShare = taxableSelling.dividedBy(totalSelling);
@@ -101,6 +108,7 @@ export function calculateSellingRate(params: {
     vatPercent: vatRate.toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(2),
     vatAmount: vatAmount.toFixed(4),
     grandTotalSelling: grandTotal.toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(4),
+    // แจ้งเตือนหากตั้งราคาขายสุทธิต่ำกว่าต้นทุนรวม (ขาดทุน)
     isBelowCost: hasAnySellingPrice && netSelling.lt(totalCost),
     hasAnySellingPrice,
   };

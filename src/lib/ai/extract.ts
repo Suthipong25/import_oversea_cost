@@ -1,6 +1,7 @@
 import { generateObject } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
+import Decimal from 'decimal.js';
 import { extractText } from 'unpdf';
 import { ExtractionResultSchema, type ExtractedChargeItem, type ExtractionResult } from './schema';
 
@@ -10,6 +11,7 @@ export interface ExtractionPipelineInput {
   fileBuffer?: Buffer;
   pastedText?: string;
   fxRateUsdToThb: number;
+  volumeCbm?: number | null;
 }
 
 export interface ExtractionPipelineOutput {
@@ -29,8 +31,18 @@ STRICT RULES:
 4. Separate THB amounts (amountThb) and USD amounts (amountUsd). Do NOT silently convert currencies unless both currencies are stated in the document.
 5. If a line explicitly states "-" or "Waived" or "N/A", set cellStatus to "NOT_APPLICABLE" and amounts to null.
 6. If WHT (Withholding Tax) or VAT is explicitly shown for a line, capture whtAmount / vatAmount.
-7. Include verbatim sourceTextSnippet for every extracted charge.`;
+7. Include verbatim sourceTextSnippet for every extracted charge.
+8. LCL Pricing Units & Volume Multiplier:
+   - Identify pricing units in chargeUnit: "PER_CBM" (per CBM/m3/คิว), "PER_WM" (per W/M, WLM), "PER_RT" (per R/T, RT, Revenue Ton), "PER_CONTAINER", "PER_BL", "PER_HBL", or "PER_SHIPMENT".
+   - Capture volumeCbm if stated in document (e.g. 2 CBM, 4 CBM, 4 R/T).
+   - If a shipment volume (e.g., 2 CBM or 4 CBM/RT) is specified, calculate the net cost: amount = unit price × volume for PER_CBM, PER_WM, PER_RT lines. Preserve the original unit price in unitAmountThb/unitAmountUsd and the multiplier.`;
 
+/**
+ * เรียงลำดับโมเดล AI ที่จะใช้ดึงรายการค่าใช้จ่าย (มี Fallback อัตโนมัติเมื่อโมเดลหลักคิวแน่น 503):
+ * - หากตั้ง GEMINI_API_KEY: ลอง GEMINI_MODEL (ค่าเริ่มต้น gemini-3.6-flash) -> 3.5-flash-lite -> 3.8-flash -> 3.7-flash
+ * - หากไม่มี Gemini แต่มี OPENAI_API_KEY: ใช้ OpenAI แทน
+ * - หากไม่มีทั้งคู่: คืนอาเรย์ว่างเพื่อสลับไปใช้ Local Parser
+ */
 function resolveAiModels() {
   const googleKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (googleKey) {
@@ -59,10 +71,12 @@ function resolveAiModels() {
 /**
  * Deterministic line-by-line parser used when no LLM API key is configured yet.
  * Never fabricates numbers; extracts explicitly stated THB/USD/WHT values verbatim.
+ * Supports volume multiplier for per-CBM, per-W/M, and per-R/T unit rates (e.g., ×2 for 2 CBM, ×4 for 4 CBM/RT).
  */
 export function parseTextDeterministically(
   rawText: string,
-  fxRateUsdToThb: number
+  fxRateUsdToThb: number,
+  volumeCbm?: number | null
 ): ExtractionResult {
   const charges: ExtractedChargeItem[] = [];
   const warnings: string[] = [];
@@ -71,6 +85,21 @@ export function parseTextDeterministically(
   if (injectionPattern.test(rawText)) {
     warnings.push('Potential prompt-injection text detected inside uploaded content and ignored.');
   }
+
+  // Detect volume from text if not explicitly provided (e.g. "Volume: 2 CBM", "4 R/T", "2.5 CBM")
+  let detectedVolume: number | null = volumeCbm ?? null;
+  if (!detectedVolume) {
+    const volMatch =
+      rawText.match(/\b(?:volume|measurement|cbm|m3|คิว|r\/?t|w\/?m|quantity|qty)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:cbm|m3|r\/?t|w\/?m|คิว)?\b/i) ??
+      rawText.match(/\b([0-9]+(?:\.[0-9]+)?)\s*(?:cbm|m3|r\/?t|w\/?m|คิว)\b/i);
+    if (volMatch?.[1]) {
+      const parsed = Number(volMatch[1]);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        detectedVolume = parsed;
+      }
+    }
+  }
+  const effectiveVolume = detectedVolume && detectedVolume > 0 ? detectedVolume : 1;
 
   // Split by newlines or pipes when users paste compact LINE strings ("Dest THC: 7,400 THB | Dest Doc: 1,500 THB")
   const rawLines = rawText
@@ -146,26 +175,60 @@ export function parseTextDeterministically(
 
     if (amountUsd === null && amountThb === null) continue;
 
-    // Keep note if only USD was quoted (do not silently convert unless user opts in during verify)
-    if (amountUsd !== null && amountThb === null && fxRateUsdToThb > 0) {
-      // Leave amountThb null to respect Rule #5 ("No silent currency conversion")
+    // Identify pricing unit: PER_CBM, PER_WM, PER_RT, PER_CONTAINER, PER_HBL, PER_SHIPMENT
+    const isPerCbm = /(?:per|\/)\s*(?:cbm|m3|คิว|cubic\s*meter)\b|\b(?:cbm|m3|คิว)\b/i.test(line);
+    const isPerWm = /(?:per|\/)\s*(?:w\s*[\/\\]\s*m|wlm|weight\s*[\/\\]\s*measure)\b|\b(?:w\s*[\/\\]\s*m|wlm)\b/i.test(line);
+    const isPerRt = /(?:per|\/)\s*(?:r\s*[\/\\]\s*t|rt|revenue\s*ton)\b|\b(?:r\s*[\/\\]\s*t|rt)\b/i.test(line);
+    const isPerCntr = /(?:per|\/)\s*(?:cntr|container|ตู้)\b/i.test(line);
+    const isPerBl = /(?:per|\/)\s*(?:hbl|bl)\b/i.test(line);
+
+    let chargeUnit = 'PER_SHIPMENT';
+    if (isPerCbm) chargeUnit = 'PER_CBM';
+    else if (isPerWm) chargeUnit = 'PER_WM';
+    else if (isPerRt) chargeUnit = 'PER_RT';
+    else if (isPerCntr) chargeUnit = 'PER_CONTAINER';
+    else if (isPerBl) chargeUnit = 'PER_HBL';
+
+    const isVolumeBased = isPerCbm || isPerWm || isPerRt;
+
+    // Calculate net cost (Cost สุทธิ): for per CBM / W/M / R/T, multiply unit rate by shipment volume
+    const unitAmountUsd = amountUsd;
+    const unitAmountThb = amountThb;
+    let netAmountUsd = amountUsd;
+    let netAmountThb = amountThb;
+    let netWhtAmount = whtAmount;
+
+    if (isVolumeBased && effectiveVolume > 1) {
+      if (amountUsd !== null) {
+        netAmountUsd = Number(new Decimal(amountUsd).times(effectiveVolume).toFixed(4));
+      }
+      if (amountThb !== null) {
+        netAmountThb = Number(new Decimal(amountThb).times(effectiveVolume).toFixed(4));
+      }
+      if (whtAmount !== null) {
+        netWhtAmount = Number(new Decimal(whtAmount).times(effectiveVolume).toFixed(4));
+      }
     }
+
+    const snippetNote =
+      isVolumeBased && effectiveVolume > 1
+        ? `${line} (คูณ ${effectiveVolume} CBM/RT)`
+        : line;
 
     charges.push({
       rawChargeName: label,
       categoryHint: 'Other',
       cellStatus: 'QUOTED',
-      amountThb,
-      amountUsd,
-      whtAmount,
+      amountThb: netAmountThb,
+      amountUsd: netAmountUsd,
+      unitAmountThb,
+      unitAmountUsd,
+      multiplier: isVolumeBased && effectiveVolume > 1 ? effectiveVolume : 1,
+      whtAmount: netWhtAmount,
       vatAmount: null,
-      chargeUnit: /\/\s*(cntr|container|ตู้)/i.test(line)
-        ? 'PER_CONTAINER'
-        : /\/\s*(hbl|bl)/i.test(line)
-          ? 'PER_HBL'
-          : 'PER_SHIPMENT',
+      chargeUnit,
       sourcePage: 1,
-      sourceTextSnippet: line,
+      sourceTextSnippet: snippetNote,
       confidenceScore: 0.8,
     });
   }
@@ -176,6 +239,7 @@ export function parseTextDeterministically(
     rateReference: null,
     polPort: null,
     podPort: null,
+    volumeCbm: detectedVolume,
     validFrom: null,
     validTo: null,
     transitTimeDays: null,
@@ -184,12 +248,99 @@ export function parseTextDeterministically(
   };
 }
 
+/**
+ * คำนวณ Cost สุทธิสำหรับเรทที่คิดตามปริมาตร (per CBM, per W/M, per R/T):
+ * ตัวอย่าง: หากงานเป็น 2 CBM -> Cost สุทธิ = ราคาต่อหน่วย × 2
+ *         หากงานเป็น 4 CBM หรือ R/T -> Cost สุทธิ = ราคาต่อหน่วย × 4
+ * รายการคงที่ (per BL, per HBL, per shipment, per container) จะไม่ถูกคูณ
+ */
+export function applyVolumeMultiplier(
+  result: ExtractionResult,
+  volumeCbm?: number | null
+): ExtractionResult {
+  const effectiveVolume =
+    (volumeCbm && volumeCbm > 0 ? volumeCbm : null) ??
+    (result.volumeCbm && result.volumeCbm > 0 ? result.volumeCbm : null) ??
+    1;
+
+  if (effectiveVolume <= 1) {
+    return {
+      ...result,
+      volumeCbm: result.volumeCbm ?? volumeCbm ?? null,
+    };
+  }
+
+  const updatedCharges = result.charges.map((ch) => {
+    const unitUpper = (ch.chargeUnit ?? '').toUpperCase();
+    const isVolumeBased =
+      unitUpper === 'PER_CBM' ||
+      unitUpper === 'PER_WM' ||
+      unitUpper === 'PER_RT' ||
+      /\b(?:cbm|m3|คิว|w\/?m|wlm|r\/?t|revenue\s*ton)\b/i.test(ch.rawChargeName);
+
+    if (!isVolumeBased) {
+      return ch;
+    }
+
+    // หากมีการคูณแล้ว (multiplier เท่ากับ effectiveVolume) ให้คงเดิม ไม่คูณซ้ำ
+    if (ch.multiplier && ch.multiplier === effectiveVolume) {
+      return ch;
+    }
+
+    const unitAmountUsd = ch.unitAmountUsd ?? ch.amountUsd;
+    const unitAmountThb = ch.unitAmountThb ?? ch.amountThb;
+
+    let netAmountUsd = ch.amountUsd;
+    let netAmountThb = ch.amountThb;
+    let netWhtAmount = ch.whtAmount;
+
+    if (unitAmountUsd !== null && unitAmountUsd !== undefined) {
+      netAmountUsd = Number(new Decimal(unitAmountUsd).times(effectiveVolume).toFixed(4));
+    }
+    if (unitAmountThb !== null && unitAmountThb !== undefined) {
+      netAmountThb = Number(new Decimal(unitAmountThb).times(effectiveVolume).toFixed(4));
+    }
+    if (ch.whtAmount !== null && ch.whtAmount !== undefined) {
+      netWhtAmount = Number(new Decimal(ch.whtAmount).times(effectiveVolume).toFixed(4));
+    }
+
+    const normalizedUnit =
+      unitUpper === 'PER_WM'
+        ? 'PER_WM'
+        : unitUpper === 'PER_RT'
+          ? 'PER_RT'
+          : 'PER_CBM';
+
+    const snippet = ch.sourceTextSnippet
+      ? (ch.sourceTextSnippet.includes('คูณ') ? ch.sourceTextSnippet : `${ch.sourceTextSnippet} (คูณ ${effectiveVolume} CBM/RT)`)
+      : `(คูณ ${effectiveVolume} CBM/RT)`;
+
+    return {
+      ...ch,
+      chargeUnit: ch.chargeUnit ?? normalizedUnit,
+      unitAmountUsd,
+      unitAmountThb,
+      amountUsd: netAmountUsd,
+      amountThb: netAmountThb,
+      whtAmount: netWhtAmount,
+      multiplier: effectiveVolume,
+      sourceTextSnippet: snippet,
+    };
+  });
+
+  return {
+    ...result,
+    volumeCbm: effectiveVolume,
+    charges: updatedCharges,
+  };
+}
+
 export async function runExtractionPipeline(
   input: ExtractionPipelineInput
 ): Promise<ExtractionPipelineOutput> {
   let extractedTextLayer: string | null = input.pastedText ?? null;
 
-  // Step 1: For PDFs, try digital text-layer extraction via unpdf before any Vision call
+  // ขั้นที่ 1: ถ้าเป็นไฟล์ PDF ลองดึง Text Layer ด้วย unpdf ก่อน (เร็วและแม่นยำกว่าส่งรูปให้ Vision LLM)
   if (input.fileType === 'PDF' && input.fileBuffer) {
     try {
       const pdfResult = await extractText(new Uint8Array(input.fileBuffer), { mergePages: true });
@@ -198,7 +349,7 @@ export async function runExtractionPipeline(
         extractedTextLayer = text;
       }
     } catch {
-      // Scanned or image-only PDF; will fall through to Vision LLM if configured
+      // กรณีเป็น PDF แบบสแกน (ไม่มี Text Layer) จะปล่อยเป็น null เพื่อส่งไฟล์เข้า Vision LLM ในขั้นที่ 2
       extractedTextLayer = null;
     }
   }
@@ -206,9 +357,16 @@ export async function runExtractionPipeline(
   const aiModels = resolveAiModels();
   let lastAiError: string | null = null;
 
-  // Step 2: Use configured Vision/Text LLM via Vercel AI SDK (with automatic fallback on transient 503 spikes)
+  const volumePromptNote =
+    input.volumeCbm && input.volumeCbm > 0
+      ? `\nSHIPMENT CONTEXT: LCL shipment volume is ${input.volumeCbm} CBM / R/T. For any charges priced per CBM, per W/M, or per R/T, calculate net cost = unit rate × ${input.volumeCbm}. Preserve the unit rate in unitAmountThb/unitAmountUsd and set multiplier to ${input.volumeCbm}.\n`
+      : '';
+
+  // ขั้นที่ 2: เรียก LLM (Gemini/OpenAI) ผ่าน generateObject เพื่อบังคับ Output ตาม Zod Schema
+  // หากโมเดลตัวแรกติด 503/Timeout จะวนลองโมเดลสำรองในลำดับถัดไปทันที (maxRetries: 0 เพื่อไม่รอค้าง)
   for (const aiConfig of aiModels) {
     try {
+      // ปรับ thinkingLevel เป็น 'low' เพื่อให้ Gemini 3 ตอบเร็วและไม่หมด Timeout ตอนอ่านตารางยาวๆ
       const googleProviderOptions =
         aiConfig.provider === 'google'
           ? { google: { thinkingConfig: { thinkingLevel: 'low' as const } } }
@@ -222,17 +380,20 @@ export async function runExtractionPipeline(
           maxRetries: 0,
           abortSignal: AbortSignal.timeout(45_000),
           providerOptions: googleProviderOptions,
-          prompt: `Extract all freight cost line items from the following document:\n<untrusted_document_payload>\n${extractedTextLayer.slice(0, 40_000)}\n</untrusted_document_payload>`,
+          // ห่อข้อมูลดิบด้วย <untrusted_document_payload> เพื่อลดความเสี่ยง Prompt Injection
+          prompt: `${volumePromptNote}Extract all freight cost line items from the following document:\n<untrusted_document_payload>\n${extractedTextLayer.slice(0, 40_000)}\n</untrusted_document_payload>`,
         });
+        const finalResult = applyVolumeMultiplier(object, input.volumeCbm);
         return {
           provider: aiConfig.provider,
           model: aiConfig.modelName,
           extractedTextLayer,
-          result: object,
+          result: finalResult,
         };
       }
 
       if (input.fileBuffer && (input.fileType === 'IMAGE' || input.fileType === 'PDF')) {
+        // กรณีเป็นรูปภาพ (Ctrl+V / JPG / PNG) หรือ PDF สแกน: ส่ง Binary File เข้า Vision LLM โดยตรง
         const { object } = await generateObject({
           model: aiConfig.model,
           schema: ExtractionResultSchema,
@@ -246,7 +407,7 @@ export async function runExtractionPipeline(
               content: [
                 {
                   type: 'text',
-                  text: 'Extract all freight cost items, WHT, VAT, THB, and USD figures from this rate document image/PDF. Never fabricate missing values.',
+                  text: `${volumePromptNote}Extract all freight cost items, WHT, VAT, THB, and USD figures from this rate document image/PDF. Never fabricate missing values.`,
                 },
                 {
                   type: 'file',
@@ -257,11 +418,12 @@ export async function runExtractionPipeline(
             },
           ],
         });
+        const finalResult = applyVolumeMultiplier(object, input.volumeCbm);
         return {
           provider: aiConfig.provider,
           model: aiConfig.modelName,
           extractedTextLayer: null,
-          result: object,
+          result: finalResult,
         };
       }
     } catch (err) {
@@ -269,9 +431,10 @@ export async function runExtractionPipeline(
     }
   }
 
-  // Step 3: Deterministic local fallback when no AI API key is configured or AI is temporarily overloaded
+  // ขั้นที่ 3 (Fallback): หากไม่มี API Key หรือ AI ล่มทั้งหมด แต่มีข้อความ ให้ใช้ Local Regex Parser แกะตัวเลขแทน
   if (extractedTextLayer) {
-    const parsed = parseTextDeterministically(extractedTextLayer, input.fxRateUsdToThb);
+    const rawParsed = parseTextDeterministically(extractedTextLayer, input.fxRateUsdToThb, input.volumeCbm);
+    const parsed = applyVolumeMultiplier(rawParsed, input.volumeCbm);
     parsed.warnings.unshift(
       lastAiError
         ? `AI model temporarily unavailable (${lastAiError}) — parsed with local text extractor. Please verify all numbers.`

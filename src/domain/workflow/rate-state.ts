@@ -14,10 +14,11 @@ export interface ComparisonGuardResult {
 }
 
 /**
- * Enforces Business Rules #3, #4, and Transition Guards:
- * - Minimum 2, maximum 5 suppliers
- * - Only Verified, unexpired rates may enter comparison
- * - POL and POD must match across all rates
+ * ตัวตรวจสอบเงื่อนไขก่อนนำใบราคาเข้าตารางเปรียบเทียบ (Compare Cost Guards):
+ * 1. ต้องมีอย่างน้อย 2 เจ้า และไม่เกิน 5 เจ้าต่อ 1 งาน
+ * 2. ทุกใบราคาต้องผ่านการตรวจสอบ (Verified) แล้วเท่านั้น
+ * 3. ห้ามนำใบราคาที่หมดอายุแล้ว (validTo < วันนี้) เข้ามาเทียบ
+ * 4. เส้นทางต้นทาง (POL) และปลายทาง (POD) ต้องตรงกันทุกเจ้า
  */
 export function canEnterComparison(
   rates: ComparableRateCandidate[],

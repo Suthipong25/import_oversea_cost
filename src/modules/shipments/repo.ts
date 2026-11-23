@@ -49,6 +49,13 @@ export interface ShipmentListItem {
   createdAt: Date;
 }
 
+/**
+ * รวมสถานะความคืบหน้าครบทั้ง 3 ขั้นตอนสำหรับหน้า "ประวัติงาน":
+ * - ขั้น ① (Compare Cost): เสร็จเมื่อเลือก Agent ผู้ชนะแล้ว (`Supplier_Selected`)
+ * - ขั้น ② (Sale Price Approve): เสร็จเมื่อ Manager อนุมัติแล้ว (`Approved`)
+ * - ขั้น ③ (Quotation PDF): เสร็จเมื่อบันทึกว่าส่งลูกค้าแล้ว (`Sent`)
+ * เมื่อครบทั้ง 3 ขั้น `isAllCompleted` จะเป็น true
+ */
 function buildWorkflowProgress(params: {
   comparisonStatus: ComparisonStatus | null;
   selectedAt: Date | null;
@@ -82,6 +89,11 @@ function buildWorkflowProgress(params: {
   };
 }
 
+/**
+ * ดึงรายการประวัติงานทั้งหมด (สูงสุด 100 งานล่าสุด) แบบ Batch Query (`inArray`)
+ * เพื่อหลีกเลี่ยงปัญหา N+1 Query โดยดึง containers, rates, comparisons, sellingRates และ quotations
+ * พร้อมกันใน Promise.all แล้วนำมาประกอบสถานะ 3 ขั้นตอนต่อแถว
+ */
 export async function listShipmentsRepo(filterAssignedUserId?: string): Promise<ShipmentListItem[]> {
   const baseQuery = db
     .select({
