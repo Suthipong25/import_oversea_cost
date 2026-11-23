@@ -15,7 +15,11 @@ import {
 import { writeAuditLog } from '@/lib/audit/logger';
 import { hasPermission } from '@/lib/auth/rbac';
 import type { AuthUser } from '@/lib/auth/session';
-import { parseVolumeMultiplierFromSummary, runExtractionPipeline } from '@/lib/ai/extract';
+import {
+  isDestinationCharge,
+  parseVolumeMultiplierFromSummary,
+  runExtractionPipeline,
+} from '@/lib/ai/extract';
 import { getLiveUsdToThbRate } from '@/lib/fx/live-rate';
 import { matchChargeToCatalog, sumRateCharges } from '@/lib/ai/normalize';
 import { convertUsdToThb } from '@/domain/comparison/scope';
@@ -288,11 +292,15 @@ export async function createStandaloneAgentCost(
     if (extractedCharges.length > 0) {
       const chargeRows = extractedCharges.map((ch) => {
         const matched = matchChargeToCatalog(ch.rawChargeName, catalogRows, aliasRows);
-        const amountUsdStr = ch.amountUsd !== null ? ch.amountUsd.toFixed(4) : null;
+        const resolvedCategory = matched?.category ?? ch.categoryHint ?? 'Other';
+        const isDest = isDestinationCharge(ch.rawChargeName, resolvedCategory);
+        const rawUsd = isDest ? (ch.unitAmountUsd ?? ch.amountUsd) : ch.amountUsd;
+        const rawThb = isDest ? (ch.unitAmountThb ?? ch.amountThb) : ch.amountThb;
+        const amountUsdStr = rawUsd !== null && rawUsd !== undefined ? rawUsd.toFixed(4) : null;
         // If only USD was quoted, convert using Perkin's CEIL_100 FX formula so THB total is ready immediately
         const amountThbStr =
-          ch.amountThb !== null
-            ? ch.amountThb.toFixed(4)
+          rawThb !== null && rawThb !== undefined
+            ? rawThb.toFixed(4)
             : amountUsdStr !== null && ch.cellStatus === 'QUOTED'
               ? convertUsdToThb(amountUsdStr, fxRateNum, 'CEIL_100')
               : null;
@@ -301,7 +309,7 @@ export async function createStandaloneAgentCost(
           rateRecordId: rate.id,
           chargeCatalogId: matched?.id ?? null,
           rawChargeName: ch.rawChargeName,
-          category: matched?.category ?? ch.categoryHint ?? 'Other',
+          category: resolvedCategory,
           cellStatus: ch.cellStatus,
           amount: amountThbStr ?? amountUsdStr,
           currency: amountUsdStr ? 'USD' : amountThbStr ? 'THB' : null,
@@ -417,6 +425,8 @@ export async function updateStandaloneAgentCostMeta(
 
       for (const ch of existingCharges) {
         if (ch.cellStatus !== 'QUOTED') continue;
+        // หมวด Destination Charge (Dest_Port) ต้องคงค่าเดิมตามที่ใส่ไว้ ไม่คูณเพิ่มตามจำนวนของ
+        if (isDestinationCharge(ch.rawChargeName, ch.category)) continue;
 
         const nextAmountThb =
           ch.amountThb !== null

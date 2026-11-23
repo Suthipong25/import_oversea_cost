@@ -131,6 +131,14 @@ function scaleValueByRatio(val: string | null | undefined, ratio: Decimal): stri
   }
 }
 
+function isClientDestinationCharge(rawChargeName: string, category?: string | null): boolean {
+  if (category === 'Dest_Port') return true;
+  if (category && category !== 'Other') return false;
+  return /\b(?:dest\b|destination|dthc|trml\s*handlg|terminal\s*handling|thc\b|d\/?o\s*fee|delivery\s*order|eqpt\s*cleaning|container\s*cleaning|cleaning\s*fee|equipment\s*maintenance|maintenance\s*premium|emp\b|cis\s*\/\s*cic|\bcis\b|\bcic\b|cfs\b|seal\s*fee|\bseal\b|e-seal|fac\b|status\s*fee|pcs\b|port\s*congestion)\b/i.test(
+    rawChargeName
+  );
+}
+
 function shipmentStatusLabel(status: string): string {
   switch (status) {
     case 'Completed (3/3)':
@@ -566,6 +574,36 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
     }
     return new Decimal(1);
   }, [savedDetailMultiplier, liveDetailMultiplier]);
+
+  const liveDetailTotals = useMemo(() => {
+    if (!activeDetailItem) {
+      return { whtThb: '0.0000', vatThb: '0.0000', amountThb: '0.0000', amountUsd: '0.0000' };
+    }
+    if (liveDetailRatio.eq(1)) return activeDetailItem.totals;
+
+    let wht = new Decimal(0);
+    let vat = new Decimal(0);
+    let thb = new Decimal(0);
+    let usd = new Decimal(0);
+
+    for (const ch of activeDetailItem.charges) {
+      if (ch.cellStatus !== 'QUOTED') continue;
+      const isDest = isClientDestinationCharge(ch.rawChargeName, ch.category);
+      const rowRatio = isDest ? new Decimal(1) : liveDetailRatio;
+
+      if (ch.whtAmount) wht = wht.plus(new Decimal(ch.whtAmount).times(rowRatio));
+      if (ch.vatAmount) vat = vat.plus(new Decimal(ch.vatAmount).times(rowRatio));
+      if (ch.amountThb) thb = thb.plus(new Decimal(ch.amountThb).times(rowRatio));
+      if (ch.amountUsd) usd = usd.plus(new Decimal(ch.amountUsd).times(rowRatio));
+    }
+
+    return {
+      whtThb: wht.toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toFixed(4),
+      vatThb: vat.toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toFixed(4),
+      amountThb: thb.toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toFixed(4),
+      amountUsd: usd.toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toFixed(4),
+    };
+  }, [activeDetailItem, liveDetailRatio]);
 
   async function saveDetailMetaValues(nextSummaryOverride?: string) {
     if (!activeDetailItem) return;
@@ -1730,10 +1768,12 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
                     </thead>
                     <tbody className="divide-y divide-[var(--border-subtle)]">
                       {activeDetailItem.charges.map((ch) => {
-                        const displayWht = scaleValueByRatio(ch.whtAmount, liveDetailRatio) ?? ch.whtAmount;
-                        const displayVat = scaleValueByRatio(ch.vatAmount, liveDetailRatio) ?? ch.vatAmount;
-                        const displayThb = scaleValueByRatio(ch.amountThb, liveDetailRatio);
-                        const displayUsd = scaleValueByRatio(ch.amountUsd, liveDetailRatio);
+                        const isDest = isClientDestinationCharge(ch.rawChargeName, ch.category);
+                        const rowRatio = isDest ? new Decimal(1) : liveDetailRatio;
+                        const displayWht = scaleValueByRatio(ch.whtAmount, rowRatio) ?? ch.whtAmount;
+                        const displayVat = scaleValueByRatio(ch.vatAmount, rowRatio) ?? ch.vatAmount;
+                        const displayThb = scaleValueByRatio(ch.amountThb, rowRatio);
+                        const displayUsd = scaleValueByRatio(ch.amountUsd, rowRatio);
 
                         return (
                           <tr
@@ -1741,7 +1781,17 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
                             className="hover:bg-[var(--surface-subtle)]/60"
                           >
                             <td className="py-2 px-3 font-medium text-[var(--text-primary)]">
-                              {ch.rawChargeName}
+                              <div className="flex items-center justify-between gap-1.5">
+                                <span>{ch.rawChargeName}</span>
+                                {isDest && (
+                                  <span
+                                    title="Destination Charge คงค่าเดิมตามที่ใส่ไว้ ไม่คูณเพิ่มตามจำนวนของ"
+                                    className="px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 border border-teal-200 text-[9px] font-semibold shrink-0"
+                                  >
+                                    Dest (คงที่)
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td className="py-1.5 px-1.5">
                               <input
@@ -1831,16 +1881,16 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
                           TOTAL {liveDetailMultiplier > 1 ? `(×${liveDetailMultiplier})` : ''}
                         </td>
                         <td className="py-2.5 px-2 text-right">
-                          {fmtMoney(scaleValueByRatio(activeDetailItem.totals.whtThb, liveDetailRatio))}
+                          {fmtMoney(liveDetailTotals.whtThb)}
                         </td>
                         <td className="py-2.5 px-2 text-right">
-                          {fmtMoney(scaleValueByRatio(activeDetailItem.totals.vatThb, liveDetailRatio))}
+                          {fmtMoney(liveDetailTotals.vatThb)}
                         </td>
                         <td className="py-2.5 px-2 text-right text-sm">
-                          {fmtMoney(scaleValueByRatio(activeDetailItem.totals.amountThb, liveDetailRatio))}
+                          {fmtMoney(liveDetailTotals.amountThb)}
                         </td>
                         <td className="py-2.5 px-2 text-right">
-                          {fmtMoney(scaleValueByRatio(activeDetailItem.totals.amountUsd, liveDetailRatio))}
+                          {fmtMoney(liveDetailTotals.amountUsd)}
                         </td>
                         <td />
                       </tr>

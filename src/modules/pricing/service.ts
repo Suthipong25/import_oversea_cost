@@ -220,6 +220,7 @@ export async function getOrInitSellingRateWorkspace(user: AuthUser, shipmentId: 
               quantity:
                 isLcl &&
                 lclVolume > 1 &&
+                c.category !== 'Dest_Port' &&
                 (c.chargeUnit === 'PER_CBM' || c.chargeUnit === 'PER_WM' || c.chargeUnit === 'PER_RT')
                   ? lclVolume.toFixed(2)
                   : '1.00',

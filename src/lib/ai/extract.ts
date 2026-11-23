@@ -80,6 +80,19 @@ export function parseVolumeMultiplierFromSummary(summary: string | null | undefi
 }
 
 /**
+ * ตรวจสอบว่ารายการค่าใช้จ่ายนี้เป็นหมวด Destination Charge (ปลายทาง / Dest_Port) หรือไม่
+ * กฎทางธุรกิจ: Destination Charge ต้องคงค่าเดิมตามที่ใส่ไว้เสมอ ต่อให้จำนวนของ/ปริมาตรเพิ่มขึ้น
+ */
+export function isDestinationCharge(rawChargeName: string, category?: string | null): boolean {
+  if (category === 'Dest_Port') return true;
+  if (category && category !== 'Other') return false;
+
+  return /\b(?:dest\b|destination|dthc|trml\s*handlg|terminal\s*handling|thc\b|d\/?o\s*fee|delivery\s*order|eqpt\s*cleaning|container\s*cleaning|cleaning\s*fee|equipment\s*maintenance|maintenance\s*premium|emp\b|cis\s*\/\s*cic|\bcis\b|\bcic\b|cfs\b|seal\s*fee|\bseal\b|e-seal|fac\b|status\s*fee|pcs\b|port\s*congestion)\b/i.test(
+    rawChargeName
+  );
+}
+
+/**
  * เรียงลำดับโมเดล AI ที่จะใช้ดึงรายการค่าใช้จ่าย (มี Fallback อัตโนมัติเมื่อโมเดลหลักคิวแน่น 503):
  * - หากตั้ง GEMINI_API_KEY: ลอง GEMINI_MODEL (ค่าเริ่มต้น gemini-3.6-flash) -> 3.5-flash-lite -> 3.8-flash -> 3.7-flash
  * - หากไม่มี Gemini แต่มี OPENAI_API_KEY: ใช้ OpenAI แทน
@@ -231,14 +244,17 @@ export function parseTextDeterministically(
     else if (isPerCntr) chargeUnit = 'PER_CONTAINER';
     else if (isPerBl) chargeUnit = 'PER_HBL';
 
-    // Calculate net cost (Cost สุทธิ): multiply all quoted rates by effectiveVolume when volume > 1
+    const isDest = isDestinationCharge(label);
+    const shouldMultiply = effectiveVolume > 1 && !isDest;
+
+    // Calculate net cost (Cost สุทธิ): multiply quoted rates by effectiveVolume except Destination charges
     const unitAmountUsd = amountUsd;
     const unitAmountThb = amountThb;
     let netAmountUsd = amountUsd;
     let netAmountThb = amountThb;
     let netWhtAmount = whtAmount;
 
-    if (effectiveVolume > 1) {
+    if (shouldMultiply) {
       if (amountUsd !== null) {
         netAmountUsd = Number(new Decimal(amountUsd).times(effectiveVolume).toFixed(4));
       }
@@ -250,20 +266,17 @@ export function parseTextDeterministically(
       }
     }
 
-    const snippetNote =
-      effectiveVolume > 1
-        ? `${line} (คูณ ${effectiveVolume})`
-        : line;
+    const snippetNote = shouldMultiply ? `${line} (คูณ ${effectiveVolume})` : line;
 
     charges.push({
       rawChargeName: label,
-      categoryHint: 'Other',
+      categoryHint: isDest ? 'Dest_Port' : 'Other',
       cellStatus: 'QUOTED',
       amountThb: netAmountThb,
       amountUsd: netAmountUsd,
       unitAmountThb,
       unitAmountUsd,
-      multiplier: effectiveVolume > 1 ? effectiveVolume : 1,
+      multiplier: shouldMultiply ? effectiveVolume : 1,
       whtAmount: netWhtAmount,
       vatAmount: null,
       chargeUnit,
@@ -290,7 +303,7 @@ export function parseTextDeterministically(
 
 /**
  * คำนวณ Cost สุทธิโดยนำตัวเลขจำนวน/ปริมาตร (เช่น 2 CBM -> ×2, 3 CBM -> ×3, 4 CBM -> ×4)
- * ไปคูณกับราคาทุกรายการ (THB, USD, WHT, VAT) เพื่อให้ได้ Cost สุทธิทันที
+ * ไปคูณกับราคาทุกรายการ ยกเว้นหมวด Destination Charge (Dest_Port) ที่ต้องคงค่าเดิมเสมอ
  */
 export function applyVolumeMultiplier(
   result: ExtractionResult,
@@ -311,6 +324,17 @@ export function applyVolumeMultiplier(
   const updatedCharges = result.charges.map((ch) => {
     if (ch.cellStatus !== 'QUOTED') {
       return ch;
+    }
+
+    // Destination charge ต้องคงค่าที่ใส่ไว้เสมอ ไม่คูณเพิ่มตามจำนวนของ
+    if (isDestinationCharge(ch.rawChargeName, ch.categoryHint)) {
+      return {
+        ...ch,
+        categoryHint: 'Dest_Port' as const,
+        amountUsd: ch.unitAmountUsd ?? ch.amountUsd,
+        amountThb: ch.unitAmountThb ?? ch.amountThb,
+        multiplier: 1,
+      };
     }
 
     // หากมีการคูณแล้ว (multiplier เท่ากับ effectiveVolume) ให้คงเดิม ไม่คูณซ้ำ

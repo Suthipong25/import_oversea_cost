@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isDestinationCharge,
   parseTextDeterministically,
   parseVolumeMultiplierFromSummary,
 } from '@/lib/ai/extract';
@@ -82,59 +83,69 @@ describe('Catalog Alias Matching & Decimal Totals', () => {
   });
 });
 
-describe('LCL Volume Multiplier (CBM / W/M / R/T Calculation)', () => {
-  it('calculates net cost for 2 CBM and 3 CBM: multiplies all charge items by the entered volume', () => {
+describe('LCL Volume Multiplier & Fixed Destination Charges', () => {
+  it('multiplies non-destination charges by volume (2 CBM / 3 CBM) while keeping Destination charges fixed', () => {
     const quoteText = `
       Ocean Freight: USD 25.00 / CBM
-      CFS: 400 THB / RT
-      THC: 350 THB / W/M
-      Delivery Order Fee: 1,500 THB / BL
-      Customs Clearance: 3,000 THB / shipment
+      Pickup: USD 100.00
+      Customs Clearance: 3,000 THB
+      Dest TRML HANDLG: 7,400 THB
+      DEST DOC FEE: 1,500 THB
+      EQPT CLEANING: 1,200 THB
+      CIS / CIC: 5,500 THB
     `;
     const res2 = parseTextDeterministically(quoteText, 34, 2);
     expect(res2.volumeCbm).toBe(2);
     expect(res2.charges.find((c) => c.rawChargeName.includes('Ocean Freight'))?.amountUsd).toBe(50);
-    expect(res2.charges.find((c) => c.rawChargeName.includes('CFS'))?.amountThb).toBe(800);
-    expect(res2.charges.find((c) => c.rawChargeName.includes('THC'))?.amountThb).toBe(700);
-    expect(res2.charges.find((c) => c.rawChargeName.includes('Delivery Order'))?.amountThb).toBe(3000);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('Pickup'))?.amountUsd).toBe(200);
     expect(res2.charges.find((c) => c.rawChargeName.includes('Customs Clearance'))?.amountThb).toBe(6000);
+    // Destination charges must remain unchanged
+    expect(res2.charges.find((c) => c.rawChargeName.includes('Dest TRML HANDLG'))?.amountThb).toBe(7400);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('DEST DOC FEE'))?.amountThb).toBe(1500);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('EQPT CLEANING'))?.amountThb).toBe(1200);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('CIS / CIC'))?.amountThb).toBe(5500);
 
     const res3 = parseTextDeterministically(quoteText, 34, 3);
     expect(res3.volumeCbm).toBe(3);
     expect(res3.charges.find((c) => c.rawChargeName.includes('Ocean Freight'))?.amountUsd).toBe(75);
-    expect(res3.charges.find((c) => c.rawChargeName.includes('CFS'))?.amountThb).toBe(1200);
-    expect(res3.charges.find((c) => c.rawChargeName.includes('THC'))?.amountThb).toBe(1050);
-    expect(res3.charges.find((c) => c.rawChargeName.includes('Delivery Order'))?.amountThb).toBe(4500);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('Pickup'))?.amountUsd).toBe(300);
     expect(res3.charges.find((c) => c.rawChargeName.includes('Customs Clearance'))?.amountThb).toBe(9000);
+    // Destination charges must still remain unchanged at 3 CBM
+    expect(res3.charges.find((c) => c.rawChargeName.includes('Dest TRML HANDLG'))?.amountThb).toBe(7400);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('DEST DOC FEE'))?.amountThb).toBe(1500);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('EQPT CLEANING'))?.amountThb).toBe(1200);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('CIS / CIC'))?.amountThb).toBe(5500);
   });
 
-  it('calculates net cost for 4 CBM / R/T: multiplies all charge items by 4', () => {
+  it('calculates net cost for 4 CBM / R/T while keeping Destination charges fixed', () => {
     const quoteText = `
       Ocean Freight: USD 25.00 / CBM
-      CFS: 400 THB / RT
       Handling Fee: 500 THB / W/M
-      Doc Fee: 1,200 THB / BL
+      Dest TRML HANDLG: 7,400 THB
+      DEST DOC FEE: 1,500 THB
     `;
     const res = parseTextDeterministically(quoteText, 34, 4);
 
     expect(res.volumeCbm).toBe(4);
     expect(res.charges.find((c) => c.rawChargeName.includes('Ocean Freight'))?.amountUsd).toBe(100);
-    expect(res.charges.find((c) => c.rawChargeName.includes('CFS'))?.amountThb).toBe(1600);
     expect(res.charges.find((c) => c.rawChargeName.includes('Handling'))?.amountThb).toBe(2000);
-    expect(res.charges.find((c) => c.rawChargeName.includes('Doc Fee'))?.amountThb).toBe(4800);
+    expect(res.charges.find((c) => c.rawChargeName.includes('Dest TRML HANDLG'))?.amountThb).toBe(7400);
+    expect(res.charges.find((c) => c.rawChargeName.includes('DEST DOC FEE'))?.amountThb).toBe(1500);
   });
 
-  it('auto-detects volume in CBM from text when not explicitly provided', () => {
+  it('auto-detects volume in CBM from text and identifies Destination charges accurately', () => {
     const quoteText = `
       Shipment Volume: 4 CBM
       Ocean Freight: USD 30.00 / CBM
-      CFS: 450 THB / RT
+      Dest TRML HANDLG: 7,400 THB
     `;
     const res = parseTextDeterministically(quoteText, 34);
 
     expect(res.volumeCbm).toBe(4);
     expect(res.charges.find((c) => c.rawChargeName.includes('Ocean Freight'))?.amountUsd).toBe(120);
-    expect(res.charges.find((c) => c.rawChargeName.includes('CFS'))?.amountThb).toBe(1800);
+    expect(res.charges.find((c) => c.rawChargeName.includes('Dest TRML HANDLG'))?.amountThb).toBe(7400);
+    expect(isDestinationCharge('Dest TRML HANDLG', 'Dest_Port')).toBe(true);
+    expect(isDestinationCharge('SEA FREIGHT CHARGE', 'Ocean')).toBe(false);
   });
 
   it('parses volume multiplier accurately from ขนาดตู้ / Volume input strings', () => {

@@ -20,7 +20,7 @@ import {
 import { writeAuditLog } from '@/lib/audit/logger';
 import { canViewAllShipments, hasPermission } from '@/lib/auth/rbac';
 import type { AuthUser } from '@/lib/auth/session';
-import { runExtractionPipeline } from '@/lib/ai/extract';
+import { isDestinationCharge, runExtractionPipeline } from '@/lib/ai/extract';
 import { getLiveUsdToThbRate } from '@/lib/fx/live-rate';
 import { matchChargeToCatalog, parseMoneyInput, sumRateCharges } from '@/lib/ai/normalize';
 import { evaluateAgentScope, findLowestComparableRateId } from '@/domain/comparison/scope';
@@ -385,8 +385,10 @@ export async function ingestRateForShipment(user: AuthUser, params: IngestRatePa
     if (extraction.result.charges.length > 0) {
       const chargeValues = extraction.result.charges.map((ch) => {
         const matched = matchChargeToCatalog(ch.rawChargeName, catalogRows, aliasRows);
-        const amountThb = parseMoneyInput(ch.amountThb);
-        const amountUsd = parseMoneyInput(ch.amountUsd);
+        const resolvedCategory = matched?.category ?? ch.categoryHint;
+        const isDest = isDestinationCharge(ch.rawChargeName, resolvedCategory);
+        const amountThb = parseMoneyInput(isDest ? (ch.unitAmountThb ?? ch.amountThb) : ch.amountThb);
+        const amountUsd = parseMoneyInput(isDest ? (ch.unitAmountUsd ?? ch.amountUsd) : ch.amountUsd);
         const whtAmount = parseMoneyInput(ch.whtAmount) ?? '0.0000';
         const vatAmount = parseMoneyInput(ch.vatAmount) ?? '0.0000';
 
@@ -394,7 +396,7 @@ export async function ingestRateForShipment(user: AuthUser, params: IngestRatePa
           rateRecordId: rate.id,
           chargeCatalogId: matched?.id ?? null,
           rawChargeName: ch.rawChargeName,
-          category: matched?.category ?? ch.categoryHint,
+          category: resolvedCategory,
           cellStatus: ch.cellStatus,
           amount: amountThb ?? amountUsd,
           currency: amountUsd ? 'USD' : amountThb ? 'THB' : null,
