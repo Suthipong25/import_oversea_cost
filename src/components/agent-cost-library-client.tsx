@@ -90,6 +90,47 @@ function fmtInput(val: string | null | undefined): string {
   }
 }
 
+function parseClientVolumeMultiplier(summary: string | null | undefined): number {
+  if (!summary) return 1;
+  const raw = summary.trim();
+  if (!raw) return 1;
+
+  const volMatch = raw.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:cbm|m3|r\/?t|w\/?m|wlm|คิว)\b/i);
+  if (volMatch?.[1]) {
+    const val = Number(volMatch[1]);
+    if (Number.isFinite(val) && val > 0) return val;
+  }
+
+  const cntrMatches = [
+    ...raw.matchAll(/([0-9]+(?:\.[0-9]+)?)\s*[x×*]\s*(?:20|40|45)\s*(?:GP|DV|HQ|HC|RF|OT|FR)?/gi),
+  ];
+  if (cntrMatches.length > 0) {
+    const totalQty = cntrMatches.reduce((sum, m) => sum + (Number(m[1]) || 0), 0);
+    if (totalQty > 0) return totalQty;
+  }
+
+  const cleaned = raw.replace(/\b(?:20|40|45)\s*(?:GP|DV|HQ|HC|RF|OT|FR|'|ft)\b/gi, '').trim();
+  const numMatch = cleaned.match(/([0-9]+(?:\.[0-9]+)?)/);
+  if (numMatch?.[1]) {
+    const val = Number(numMatch[1]);
+    if (Number.isFinite(val) && val > 0) return val;
+  }
+
+  return 1;
+}
+
+function scaleValueByRatio(val: string | null | undefined, ratio: Decimal): string | null {
+  if (val === null || val === undefined || val === '') return null;
+  if (ratio.eq(1)) return val;
+  try {
+    const d = new Decimal(val);
+    if (d.isZero()) return val;
+    return d.times(ratio).toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toFixed(4);
+  } catch {
+    return val;
+  }
+}
+
 function shipmentStatusLabel(status: string): string {
   switch (status) {
     case 'Completed (3/3)':
@@ -504,9 +545,32 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
     }
   }
 
-  async function handleSaveDetailMeta(e: React.FormEvent) {
-    e.preventDefault();
+  const createModalMultiplier = useMemo(
+    () => parseClientVolumeMultiplier(containerSummary),
+    [containerSummary]
+  );
+
+  const savedDetailMultiplier = useMemo(
+    () => (activeDetailItem ? parseClientVolumeMultiplier(activeDetailItem.containerSummary) : 1),
+    [activeDetailItem]
+  );
+
+  const liveDetailMultiplier = useMemo(
+    () => parseClientVolumeMultiplier(editContainerSummary),
+    [editContainerSummary]
+  );
+
+  const liveDetailRatio = useMemo(() => {
+    if (savedDetailMultiplier > 0 && liveDetailMultiplier > 0) {
+      return new Decimal(liveDetailMultiplier).dividedBy(savedDetailMultiplier);
+    }
+    return new Decimal(1);
+  }, [savedDetailMultiplier, liveDetailMultiplier]);
+
+  async function saveDetailMetaValues(nextSummaryOverride?: string) {
     if (!activeDetailItem) return;
+    const summaryToSave = (nextSummaryOverride ?? editContainerSummary).trim();
+    if (!summaryToSave) return;
     setDetailBusy(true);
     setError(null);
     try {
@@ -518,19 +582,36 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
           modeType: editModeType,
           polPortCode: editPol,
           podPortCode: editPod,
-          containerSummary: editContainerSummary,
+          containerSummary: summaryToSave,
         }),
       });
-      const json = (await res.json()) as { success: boolean; error?: { message?: string } };
+      const json = (await res.json()) as {
+        success: boolean;
+        data?: { prevMultiplier?: number; nextMultiplier?: number };
+        error?: { message?: string };
+      };
       if (!res.ok || !json.success) {
         setError(json.error?.message ?? 'บันทึกข้อมูลหัวรายการไม่สำเร็จ');
         return;
       }
-      setNotice('อัปเดตชื่อ Agent เส้นทาง และขนาดตู้เรียบร้อยแล้ว');
+      const prevMult = json.data?.prevMultiplier ?? savedDetailMultiplier;
+      const nextMult = json.data?.nextMultiplier ?? liveDetailMultiplier;
+      if (prevMult !== nextMult) {
+        setNotice(
+          `อัปเดตขนาดตู้/Volume เป็น "${summaryToSave}" และคูณราคาทุกรายการ (×${nextMult}) เรียบร้อยแล้ว`
+        );
+      } else {
+        setNotice('อัปเดตชื่อ Agent เส้นทาง และขนาดตู้เรียบร้อยแล้ว');
+      }
       router.refresh();
     } finally {
       setDetailBusy(false);
     }
+  }
+
+  async function handleSaveDetailMeta(e: React.FormEvent) {
+    e.preventDefault();
+    await saveDetailMetaValues();
   }
 
   async function handleApplyFxDetail(rateId: string) {
@@ -1340,9 +1421,16 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
                   />
                 </div>
                 <div className="space-y-1">
-                  <label htmlFor="ac-size" className="block font-semibold">
-                    ขนาดตู้ / Volume *
-                  </label>
+                  <div className="flex items-center justify-between gap-1">
+                    <label htmlFor="ac-size" className="block font-semibold">
+                      ขนาดตู้ / Volume *
+                    </label>
+                    {createModalMultiplier > 1 && (
+                      <span className="px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] font-mono font-bold text-[10px]">
+                        คูณราคา ×{createModalMultiplier}
+                      </span>
+                    )}
+                  </div>
                   <input
                     id="ac-size"
                     type="text"
@@ -1560,15 +1648,31 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
                     />
                   </div>
                   <div className="space-y-1">
-                    <label htmlFor="ed-size" className="block font-semibold text-[var(--text-secondary)]">
-                      ขนาดตู้ / Volume
-                    </label>
+                    <div className="flex items-center justify-between gap-1">
+                      <label htmlFor="ed-size" className="block font-semibold text-[var(--text-secondary)]">
+                        ขนาดตู้ / Volume
+                      </label>
+                      {liveDetailMultiplier > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] font-mono font-bold text-[10px]">
+                          ×{liveDetailMultiplier}
+                        </span>
+                      )}
+                    </div>
                     <input
                       id="ed-size"
                       type="text"
                       required
                       value={editContainerSummary}
                       onChange={(e) => setEditContainerSummary(e.target.value)}
+                      onBlur={() => {
+                        if (
+                          activeDetailItem &&
+                          editContainerSummary.trim() !== '' &&
+                          editContainerSummary.trim() !== activeDetailItem.containerSummary.trim()
+                        ) {
+                          void saveDetailMetaValues(editContainerSummary);
+                        }
+                      }}
                       className="w-full px-2.5 py-1.5 rounded-lg border border-[var(--border-default)] bg-[var(--surface-card)] font-mono"
                     />
                   </div>
@@ -1625,87 +1729,94 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[var(--border-subtle)]">
-                      {activeDetailItem.charges.map((ch) => (
-                        <tr
-                          key={`${ch.id}-${ch.whtAmount}-${ch.vatAmount}-${ch.amountThb ?? ''}-${ch.amountUsd ?? ''}`}
-                          className="hover:bg-[var(--surface-subtle)]/60"
-                        >
-                          <td className="py-2 px-3 font-medium text-[var(--text-primary)]">
-                            {ch.rawChargeName}
-                          </td>
-                          <td className="py-1.5 px-1.5">
-                            <input
-                              type="text"
-                              aria-label={`WHT for ${ch.rawChargeName}`}
-                              defaultValue={fmtInput(ch.whtAmount)}
-                              onBlur={(e) => {
-                                if (e.target.value !== fmtInput(ch.whtAmount)) {
-                                  handleSaveChargeCell(activeDetailItem.id, ch, {
-                                    whtAmount: e.target.value || '0',
-                                  });
-                                }
-                              }}
-                              className="w-full px-1.5 py-1 rounded border border-[var(--border-subtle)] text-right tabular-nums"
-                            />
-                          </td>
-                          <td className="py-1.5 px-1.5">
-                            <input
-                              type="text"
-                              aria-label={`VAT for ${ch.rawChargeName}`}
-                              defaultValue={fmtInput(ch.vatAmount)}
-                              onBlur={(e) => {
-                                if (e.target.value !== fmtInput(ch.vatAmount)) {
-                                  handleSaveChargeCell(activeDetailItem.id, ch, {
-                                    vatAmount: e.target.value || '0',
-                                  });
-                                }
-                              }}
-                              className="w-full px-1.5 py-1 rounded border border-[var(--border-subtle)] text-right tabular-nums"
-                            />
-                          </td>
-                          <td className="py-1.5 px-1.5">
-                            <input
-                              type="text"
-                              aria-label={`THB for ${ch.rawChargeName}`}
-                              defaultValue={fmtInput(ch.amountThb)}
-                              onBlur={(e) => {
-                                if (e.target.value !== fmtInput(ch.amountThb)) {
-                                  handleSaveChargeCell(activeDetailItem.id, ch, {
-                                    amountThb: e.target.value,
-                                  });
-                                }
-                              }}
-                              className="w-full px-2 py-1 rounded border border-[var(--border-default)] text-right tabular-nums font-semibold"
-                            />
-                          </td>
-                          <td className="py-1.5 px-1.5">
-                            <input
-                              type="text"
-                              aria-label={`USD for ${ch.rawChargeName}`}
-                              defaultValue={fmtInput(ch.amountUsd)}
-                              onBlur={(e) => {
-                                if (e.target.value !== fmtInput(ch.amountUsd)) {
-                                  handleSaveChargeCell(activeDetailItem.id, ch, {
-                                    amountUsd: e.target.value,
-                                  });
-                                }
-                              }}
-                              className="w-full px-1.5 py-1 rounded border border-[var(--border-subtle)] text-right tabular-nums"
-                            />
-                          </td>
-                          <td className="py-1.5 px-1 text-center">
-                            <button
-                              type="button"
-                              aria-label={`ลบบรรทัด ${ch.rawChargeName}`}
-                              disabled={detailBusy}
-                              onClick={() => handleRemoveChargeRow(activeDetailItem.id, ch)}
-                              className="p-1 text-[var(--text-muted)] hover:text-[var(--status-danger-fg)]"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                      {activeDetailItem.charges.map((ch) => {
+                        const displayWht = scaleValueByRatio(ch.whtAmount, liveDetailRatio) ?? ch.whtAmount;
+                        const displayVat = scaleValueByRatio(ch.vatAmount, liveDetailRatio) ?? ch.vatAmount;
+                        const displayThb = scaleValueByRatio(ch.amountThb, liveDetailRatio);
+                        const displayUsd = scaleValueByRatio(ch.amountUsd, liveDetailRatio);
+
+                        return (
+                          <tr
+                            key={`${ch.id}-${displayWht}-${displayVat}-${displayThb ?? ''}-${displayUsd ?? ''}`}
+                            className="hover:bg-[var(--surface-subtle)]/60"
+                          >
+                            <td className="py-2 px-3 font-medium text-[var(--text-primary)]">
+                              {ch.rawChargeName}
+                            </td>
+                            <td className="py-1.5 px-1.5">
+                              <input
+                                type="text"
+                                aria-label={`WHT for ${ch.rawChargeName}`}
+                                defaultValue={fmtInput(displayWht)}
+                                onBlur={(e) => {
+                                  if (e.target.value !== fmtInput(displayWht)) {
+                                    handleSaveChargeCell(activeDetailItem.id, ch, {
+                                      whtAmount: e.target.value || '0',
+                                    });
+                                  }
+                                }}
+                                className="w-full px-1.5 py-1 rounded border border-[var(--border-subtle)] text-right tabular-nums"
+                              />
+                            </td>
+                            <td className="py-1.5 px-1.5">
+                              <input
+                                type="text"
+                                aria-label={`VAT for ${ch.rawChargeName}`}
+                                defaultValue={fmtInput(displayVat)}
+                                onBlur={(e) => {
+                                  if (e.target.value !== fmtInput(displayVat)) {
+                                    handleSaveChargeCell(activeDetailItem.id, ch, {
+                                      vatAmount: e.target.value || '0',
+                                    });
+                                  }
+                                }}
+                                className="w-full px-1.5 py-1 rounded border border-[var(--border-subtle)] text-right tabular-nums"
+                              />
+                            </td>
+                            <td className="py-1.5 px-1.5">
+                              <input
+                                type="text"
+                                aria-label={`THB for ${ch.rawChargeName}`}
+                                defaultValue={fmtInput(displayThb)}
+                                onBlur={(e) => {
+                                  if (e.target.value !== fmtInput(displayThb)) {
+                                    handleSaveChargeCell(activeDetailItem.id, ch, {
+                                      amountThb: e.target.value,
+                                    });
+                                  }
+                                }}
+                                className="w-full px-2 py-1 rounded border border-[var(--border-default)] text-right tabular-nums font-semibold"
+                              />
+                            </td>
+                            <td className="py-1.5 px-1.5">
+                              <input
+                                type="text"
+                                aria-label={`USD for ${ch.rawChargeName}`}
+                                defaultValue={fmtInput(displayUsd)}
+                                onBlur={(e) => {
+                                  if (e.target.value !== fmtInput(displayUsd)) {
+                                    handleSaveChargeCell(activeDetailItem.id, ch, {
+                                      amountUsd: e.target.value,
+                                    });
+                                  }
+                                }}
+                                className="w-full px-1.5 py-1 rounded border border-[var(--border-subtle)] text-right tabular-nums"
+                              />
+                            </td>
+                            <td className="py-1.5 px-1 text-center">
+                              <button
+                                type="button"
+                                aria-label={`ลบบรรทัด ${ch.rawChargeName}`}
+                                disabled={detailBusy}
+                                onClick={() => handleRemoveChargeRow(activeDetailItem.id, ch)}
+                                className="p-1 text-[var(--text-muted)] hover:text-[var(--status-danger-fg)]"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
                       {activeDetailItem.charges.length === 0 && (
                         <tr>
                           <td colSpan={6} className="py-6 text-center text-[var(--text-muted)]">
@@ -1716,18 +1827,20 @@ export function AgentCostLibraryClient(props: AgentCostLibraryProps) {
                     </tbody>
                     <tfoot>
                       <tr className="bg-[var(--surface-subtle)] border-t-2 border-[var(--text-primary)] font-bold tabular-nums">
-                        <td className="py-2.5 px-3">TOTAL</td>
-                        <td className="py-2.5 px-2 text-right">
-                          {fmtMoney(activeDetailItem.totals.whtThb)}
+                        <td className="py-2.5 px-3">
+                          TOTAL {liveDetailMultiplier > 1 ? `(×${liveDetailMultiplier})` : ''}
                         </td>
                         <td className="py-2.5 px-2 text-right">
-                          {fmtMoney(activeDetailItem.totals.vatThb)}
+                          {fmtMoney(scaleValueByRatio(activeDetailItem.totals.whtThb, liveDetailRatio))}
+                        </td>
+                        <td className="py-2.5 px-2 text-right">
+                          {fmtMoney(scaleValueByRatio(activeDetailItem.totals.vatThb, liveDetailRatio))}
                         </td>
                         <td className="py-2.5 px-2 text-right text-sm">
-                          {fmtMoney(activeDetailItem.totals.amountThb)}
+                          {fmtMoney(scaleValueByRatio(activeDetailItem.totals.amountThb, liveDetailRatio))}
                         </td>
                         <td className="py-2.5 px-2 text-right">
-                          {fmtMoney(activeDetailItem.totals.amountUsd)}
+                          {fmtMoney(scaleValueByRatio(activeDetailItem.totals.amountUsd, liveDetailRatio))}
                         </td>
                         <td />
                       </tr>

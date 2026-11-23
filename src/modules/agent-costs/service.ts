@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import Decimal from 'decimal.js';
 import { asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { db, withUserContext } from '@/lib/db';
 import {
@@ -14,7 +15,7 @@ import {
 import { writeAuditLog } from '@/lib/audit/logger';
 import { hasPermission } from '@/lib/auth/rbac';
 import type { AuthUser } from '@/lib/auth/session';
-import { runExtractionPipeline } from '@/lib/ai/extract';
+import { parseVolumeMultiplierFromSummary, runExtractionPipeline } from '@/lib/ai/extract';
 import { getLiveUsdToThbRate } from '@/lib/fx/live-rate';
 import { matchChargeToCatalog, sumRateCharges } from '@/lib/ai/normalize';
 import { convertUsdToThb } from '@/domain/comparison/scope';
@@ -223,6 +224,7 @@ export async function createStandaloneAgentCost(
   ]);
 
   const fxRateNum = fxSnapshot.rate;
+  const volumeCbm = parseVolumeMultiplierFromSummary(params.containerSummary);
 
   const hasExtractionInput =
     Boolean(fileBuffer) || Boolean(params.pastedText && params.pastedText.trim().length > 0);
@@ -234,6 +236,7 @@ export async function createStandaloneAgentCost(
         fileBuffer,
         pastedText: params.pastedText ?? undefined,
         fxRateUsdToThb: fxRateNum,
+        volumeCbm,
       })
     : null;
 
@@ -378,6 +381,9 @@ export async function updateStandaloneAgentCostMeta(
   const nextSummary =
     input.containerSummary.trim() || (input.modeType === 'LCL' ? 'LCL' : '1×40DV');
 
+  const prevMultiplier = parseVolumeMultiplierFromSummary(existing.containerSummary);
+  const nextMultiplier = parseVolumeMultiplierFromSummary(nextSummary);
+
   return withUserContext(user, async (tx) => {
     const [updated] = await tx
       .update(rateRecords)
@@ -400,6 +406,48 @@ export async function updateStandaloneAgentCostMeta(
         .where(eq(sourceDocuments.id, existing.sourceDocumentId));
     }
 
+    // เมื่อผู้ใช้เปลี่ยนตัวเลขในช่อง "ขนาดตู้ / Volume" (เช่นจาก 1 CBM -> 3 CBM)
+    // ให้ปรับคูณราคาทุกรายการ (THB, USD, WHT, VAT) ตามสัดส่วนใหม่ (nextMultiplier / prevMultiplier) ทันที
+    if (prevMultiplier !== nextMultiplier && prevMultiplier > 0 && nextMultiplier > 0) {
+      const ratio = new Decimal(nextMultiplier).dividedBy(prevMultiplier);
+      const existingCharges = await tx
+        .select()
+        .from(rateCharges)
+        .where(eq(rateCharges.rateRecordId, rateRecordId));
+
+      for (const ch of existingCharges) {
+        if (ch.cellStatus !== 'QUOTED') continue;
+
+        const nextAmountThb =
+          ch.amountThb !== null
+            ? new Decimal(ch.amountThb).times(ratio).toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toFixed(4)
+            : null;
+        const nextAmountUsd =
+          ch.amountUsd !== null
+            ? new Decimal(ch.amountUsd).times(ratio).toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toFixed(4)
+            : null;
+        const nextWht = new Decimal(ch.whtAmount ?? '0')
+          .times(ratio)
+          .toDecimalPlaces(4, Decimal.ROUND_HALF_UP)
+          .toFixed(4);
+        const nextVat = new Decimal(ch.vatAmount ?? '0')
+          .times(ratio)
+          .toDecimalPlaces(4, Decimal.ROUND_HALF_UP)
+          .toFixed(4);
+
+        await tx
+          .update(rateCharges)
+          .set({
+            amountThb: nextAmountThb,
+            amountUsd: nextAmountUsd,
+            amount: nextAmountThb ?? nextAmountUsd,
+            whtAmount: nextWht,
+            vatAmount: nextVat,
+          })
+          .where(eq(rateCharges.id, ch.id));
+      }
+    }
+
     await writeAuditLog(tx, {
       entityType: existing.shipmentId ? 'shipment' : 'rate_record',
       entityId: existing.shipmentId ?? rateRecordId,
@@ -411,6 +459,7 @@ export async function updateStandaloneAgentCostMeta(
         polPortCode: existing.polPortCode,
         podPortCode: existing.podPortCode,
         containerSummary: existing.containerSummary,
+        multiplier: prevMultiplier,
       },
       newState: {
         agentName: agent.name,
@@ -418,10 +467,17 @@ export async function updateStandaloneAgentCostMeta(
         polPortCode: nextPol,
         podPortCode: nextPod,
         containerSummary: nextSummary,
+        multiplier: nextMultiplier,
       },
     });
 
-    return { updated: true, rateRecord: updated, agentName: agent.name };
+    return {
+      updated: true,
+      rateRecord: updated,
+      agentName: agent.name,
+      prevMultiplier,
+      nextMultiplier,
+    };
   });
 }
 
@@ -434,8 +490,13 @@ function generateShipmentRef(): string {
 }
 
 function parseContainersFromSummary(modeType: string, summary: string) {
-  if (modeType.toUpperCase() === 'LCL' || summary.toUpperCase().includes('LCL')) {
-    return [{ containerType: 'LCL', quantity: 1 }];
+  if (
+    modeType.toUpperCase() === 'LCL' ||
+    summary.toUpperCase().includes('LCL') ||
+    /\b(?:cbm|m3|r\/?t|w\/?m|wlm|คิว)\b/i.test(summary)
+  ) {
+    const qty = Math.max(1, Math.round(parseVolumeMultiplierFromSummary(summary)));
+    return [{ containerType: 'LCL', quantity: qty }];
   }
 
   const matches = [...summary.toUpperCase().matchAll(/(\d+)\s*[X×]\s*(20GP|40DV|40HQ|45HQ|20RF|40RF)/g)];

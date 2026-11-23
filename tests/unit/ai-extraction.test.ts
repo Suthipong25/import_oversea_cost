@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { parseTextDeterministically } from '@/lib/ai/extract';
+import {
+  parseTextDeterministically,
+  parseVolumeMultiplierFromSummary,
+} from '@/lib/ai/extract';
 import { matchChargeToCatalog, sumRateCharges } from '@/lib/ai/normalize';
 
 describe('Deterministic Rate Text Extraction & Prompt Injection Defense', () => {
@@ -80,7 +83,7 @@ describe('Catalog Alias Matching & Decimal Totals', () => {
 });
 
 describe('LCL Volume Multiplier (CBM / W/M / R/T Calculation)', () => {
-  it('calculates net cost for 2 CBM: multiplies per CBM/WM/RT rates by 2 while preserving fixed lines', () => {
+  it('calculates net cost for 2 CBM and 3 CBM: multiplies all charge items by the entered volume', () => {
     const quoteText = `
       Ocean Freight: USD 25.00 / CBM
       CFS: 400 THB / RT
@@ -88,38 +91,24 @@ describe('LCL Volume Multiplier (CBM / W/M / R/T Calculation)', () => {
       Delivery Order Fee: 1,500 THB / BL
       Customs Clearance: 3,000 THB / shipment
     `;
-    const res = parseTextDeterministically(quoteText, 34, 2);
+    const res2 = parseTextDeterministically(quoteText, 34, 2);
+    expect(res2.volumeCbm).toBe(2);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('Ocean Freight'))?.amountUsd).toBe(50);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('CFS'))?.amountThb).toBe(800);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('THC'))?.amountThb).toBe(700);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('Delivery Order'))?.amountThb).toBe(3000);
+    expect(res2.charges.find((c) => c.rawChargeName.includes('Customs Clearance'))?.amountThb).toBe(6000);
 
-    expect(res.volumeCbm).toBe(2);
-
-    const of = res.charges.find((c) => c.rawChargeName.includes('Ocean Freight'));
-    expect(of?.chargeUnit).toBe('PER_CBM');
-    expect(of?.unitAmountUsd).toBe(25);
-    expect(of?.multiplier).toBe(2);
-    expect(of?.amountUsd).toBe(50); // 25 × 2 = 50 USD Cost สุทธิ
-
-    const cfs = res.charges.find((c) => c.rawChargeName.includes('CFS'));
-    expect(cfs?.chargeUnit).toBe('PER_RT');
-    expect(cfs?.unitAmountThb).toBe(400);
-    expect(cfs?.multiplier).toBe(2);
-    expect(cfs?.amountThb).toBe(800); // 400 × 2 = 800 THB Cost สุทธิ
-
-    const thc = res.charges.find((c) => c.rawChargeName.includes('THC'));
-    expect(thc?.chargeUnit).toBe('PER_WM');
-    expect(thc?.unitAmountThb).toBe(350);
-    expect(thc?.multiplier).toBe(2);
-    expect(thc?.amountThb).toBe(700); // 350 × 2 = 700 THB Cost สุทธิ
-
-    const doFee = res.charges.find((c) => c.rawChargeName.includes('Delivery Order'));
-    expect(doFee?.chargeUnit).toBe('PER_HBL');
-    expect(doFee?.amountThb).toBe(1500); // Fixed per BL remains 1,500 THB
-
-    const customs = res.charges.find((c) => c.rawChargeName.includes('Customs Clearance'));
-    expect(customs?.chargeUnit).toBe('PER_SHIPMENT');
-    expect(customs?.amountThb).toBe(3000); // Fixed per shipment remains 3,000 THB
+    const res3 = parseTextDeterministically(quoteText, 34, 3);
+    expect(res3.volumeCbm).toBe(3);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('Ocean Freight'))?.amountUsd).toBe(75);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('CFS'))?.amountThb).toBe(1200);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('THC'))?.amountThb).toBe(1050);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('Delivery Order'))?.amountThb).toBe(4500);
+    expect(res3.charges.find((c) => c.rawChargeName.includes('Customs Clearance'))?.amountThb).toBe(9000);
   });
 
-  it('calculates net cost for 4 CBM / R/T: multiplies per CBM/WM/RT rates by 4', () => {
+  it('calculates net cost for 4 CBM / R/T: multiplies all charge items by 4', () => {
     const quoteText = `
       Ocean Freight: USD 25.00 / CBM
       CFS: 400 THB / RT
@@ -129,24 +118,10 @@ describe('LCL Volume Multiplier (CBM / W/M / R/T Calculation)', () => {
     const res = parseTextDeterministically(quoteText, 34, 4);
 
     expect(res.volumeCbm).toBe(4);
-
-    const of = res.charges.find((c) => c.rawChargeName.includes('Ocean Freight'));
-    expect(of?.unitAmountUsd).toBe(25);
-    expect(of?.multiplier).toBe(4);
-    expect(of?.amountUsd).toBe(100); // 25 × 4 = 100 USD Cost สุทธิ
-
-    const cfs = res.charges.find((c) => c.rawChargeName.includes('CFS'));
-    expect(cfs?.unitAmountThb).toBe(400);
-    expect(cfs?.multiplier).toBe(4);
-    expect(cfs?.amountThb).toBe(1600); // 400 × 4 = 1,600 THB Cost สุทธิ
-
-    const handling = res.charges.find((c) => c.rawChargeName.includes('Handling'));
-    expect(handling?.unitAmountThb).toBe(500);
-    expect(handling?.multiplier).toBe(4);
-    expect(handling?.amountThb).toBe(2000); // 500 × 4 = 2,000 THB Cost สุทธิ
-
-    const doc = res.charges.find((c) => c.rawChargeName.includes('Doc Fee'));
-    expect(doc?.amountThb).toBe(1200); // Fixed line remains 1,200 THB
+    expect(res.charges.find((c) => c.rawChargeName.includes('Ocean Freight'))?.amountUsd).toBe(100);
+    expect(res.charges.find((c) => c.rawChargeName.includes('CFS'))?.amountThb).toBe(1600);
+    expect(res.charges.find((c) => c.rawChargeName.includes('Handling'))?.amountThb).toBe(2000);
+    expect(res.charges.find((c) => c.rawChargeName.includes('Doc Fee'))?.amountThb).toBe(4800);
   });
 
   it('auto-detects volume in CBM from text when not explicitly provided', () => {
@@ -158,11 +133,19 @@ describe('LCL Volume Multiplier (CBM / W/M / R/T Calculation)', () => {
     const res = parseTextDeterministically(quoteText, 34);
 
     expect(res.volumeCbm).toBe(4);
+    expect(res.charges.find((c) => c.rawChargeName.includes('Ocean Freight'))?.amountUsd).toBe(120);
+    expect(res.charges.find((c) => c.rawChargeName.includes('CFS'))?.amountThb).toBe(1800);
+  });
 
-    const of = res.charges.find((c) => c.rawChargeName.includes('Ocean Freight'));
-    expect(of?.amountUsd).toBe(120); // 30 × 4 = 120 USD Cost สุทธิ
-
-    const cfs = res.charges.find((c) => c.rawChargeName.includes('CFS'));
-    expect(cfs?.amountThb).toBe(1800); // 450 × 4 = 1,800 THB Cost สุทธิ
+  it('parses volume multiplier accurately from ขนาดตู้ / Volume input strings', () => {
+    expect(parseVolumeMultiplierFromSummary('LCL · 1 CBM')).toBe(1);
+    expect(parseVolumeMultiplierFromSummary('LCL · 3 CBM')).toBe(3);
+    expect(parseVolumeMultiplierFromSummary('3 cbm')).toBe(3);
+    expect(parseVolumeMultiplierFromSummary('4 R/T')).toBe(4);
+    expect(parseVolumeMultiplierFromSummary('2.5 W/M')).toBe(2.5);
+    expect(parseVolumeMultiplierFromSummary('1×40DV')).toBe(1);
+    expect(parseVolumeMultiplierFromSummary('2×40DV')).toBe(2);
+    expect(parseVolumeMultiplierFromSummary('40DV')).toBe(1);
+    expect(parseVolumeMultiplierFromSummary('3')).toBe(3);
   });
 });

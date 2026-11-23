@@ -297,7 +297,13 @@ export async function ingestRateForShipment(user: AuthUser, params: IngestRatePa
   const fxRateNum = fxSnapshot.rate;
 
   const lclContainer = containers.find((c) => c.containerType.toUpperCase() === 'LCL');
-  const volumeCbm = lclContainer && Number(lclContainer.quantity) > 0 ? Number(lclContainer.quantity) : null;
+  const totalQty = containers.reduce((sum, c) => sum + (Number(c.quantity) || 0), 0);
+  const volumeCbm =
+    lclContainer && Number(lclContainer.quantity) > 0
+      ? Number(lclContainer.quantity)
+      : totalQty > 1
+        ? totalQty
+        : null;
 
   // Execute AI / unpdf / deterministic extraction pipeline
   const extraction = await runExtractionPipeline({

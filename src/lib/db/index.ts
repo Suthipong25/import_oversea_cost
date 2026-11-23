@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { Pool } from 'pg';
 import * as schema from './schema';
 
-const globalForDb = globalThis as unknown as { pgPool?: Pool };
+const globalForDb = globalThis as unknown as { pgPool?: Pool; pgPoolUrl?: string };
 
 function getConnectionString(): string {
   const url = process.env.DATABASE_URL;
@@ -16,13 +16,23 @@ function getConnectionString(): string {
 }
 
 export function getPool(): Pool {
-  if (!globalForDb.pgPool) {
-    globalForDb.pgPool = new Pool({
-      connectionString: getConnectionString(),
+  const connectionString = getConnectionString();
+  if (!globalForDb.pgPool || globalForDb.pgPoolUrl !== connectionString) {
+    if (globalForDb.pgPool) {
+      void globalForDb.pgPool.end().catch(() => {});
+    }
+    const pool = new Pool({
+      connectionString,
       max: 10,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
+      keepAlive: true,
     });
+    pool.on('error', () => {
+      // Prevent dropped idle LAN connections from crashing the Next.js server process
+    });
+    globalForDb.pgPool = pool;
+    globalForDb.pgPoolUrl = connectionString;
   }
   return globalForDb.pgPool;
 }

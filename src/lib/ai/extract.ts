@@ -32,10 +32,52 @@ STRICT RULES:
 5. If a line explicitly states "-" or "Waived" or "N/A", set cellStatus to "NOT_APPLICABLE" and amounts to null.
 6. If WHT (Withholding Tax) or VAT is explicitly shown for a line, capture whtAmount / vatAmount.
 7. Include verbatim sourceTextSnippet for every extracted charge.
-8. LCL Pricing Units & Volume Multiplier:
+8. LCL Pricing Units & Volume:
    - Identify pricing units in chargeUnit: "PER_CBM" (per CBM/m3/คิว), "PER_WM" (per W/M, WLM), "PER_RT" (per R/T, RT, Revenue Ton), "PER_CONTAINER", "PER_BL", "PER_HBL", or "PER_SHIPMENT".
-   - Capture volumeCbm if stated in document (e.g. 2 CBM, 4 CBM, 4 R/T).
-   - If a shipment volume (e.g., 2 CBM or 4 CBM/RT) is specified, calculate the net cost: amount = unit price × volume for PER_CBM, PER_WM, PER_RT lines. Preserve the original unit price in unitAmountThb/unitAmountUsd and the multiplier.`;
+   - Capture volumeCbm if stated in document (e.g. 2 CBM, 3 CBM, 4 R/T).
+   - Extract the verbatim rate amounts from the document into amountThb and amountUsd (do not pre-multiply in the LLM; the deterministic post-processor multiplies all charges by the volume multiplier).`;
+
+/**
+ * ดึงตัวคูณจำนวน/ปริมาตร (Multiplier) จากข้อความ "ขนาดตู้ / Volume" เช่น:
+ * - "LCL · 3 CBM" -> 3
+ * - "4 CBM" / "4 R/T" / "2.5 W/M" -> 4 / 2.5
+ * - "2×40DV" -> 2
+ * - "1×40DV" / "40DV" -> 1
+ * - "3" -> 3
+ */
+export function parseVolumeMultiplierFromSummary(summary: string | null | undefined): number {
+  if (!summary) return 1;
+  const raw = summary.trim();
+  if (!raw) return 1;
+
+  // 1. กรณีระบุหน่วยปริมาตรชัดเจน เช่น "LCL · 3 CBM", "3 cbm", "4 R/T", "2.5 W/M", "3 คิว"
+  const volMatch = raw.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:cbm|m3|r\/?t|w\/?m|wlm|คิว)\b/i);
+  if (volMatch?.[1]) {
+    const val = Number(volMatch[1]);
+    if (Number.isFinite(val) && val > 0) return val;
+  }
+
+  // 2. กรณีระบุจำนวนตู้แบบ "2×40DV" หรือ "1×40DV + 2×20GP"
+  const cntrMatches = [
+    ...raw.matchAll(/([0-9]+(?:\.[0-9]+)?)\s*[x×*]\s*(?:20|40|45)\s*(?:GP|DV|HQ|HC|RF|OT|FR)?/gi),
+  ];
+  if (cntrMatches.length > 0) {
+    const totalQty = cntrMatches.reduce((sum, m) => sum + (Number(m[1]) || 0), 0);
+    if (totalQty > 0) return totalQty;
+  }
+
+  // 3. ลบชื่อขนาดตู้มาตรฐานออกก่อน (เช่น 20GP, 40DV, 40HQ, 45HQ, 20RF, 40RF, 20', 40') เพื่อไม่ให้เลข 20/40 ถูกเข้าใจผิดเป็นตัวคูณ
+  const cleaned = raw.replace(/\b(?:20|40|45)\s*(?:GP|DV|HQ|HC|RF|OT|FR|'|ft)\b/gi, '').trim();
+
+  // 4. ดึงตัวเลขที่เหลือในช่อง (เช่น "LCL 3", "3", "×3", "*3")
+  const numMatch = cleaned.match(/([0-9]+(?:\.[0-9]+)?)/);
+  if (numMatch?.[1]) {
+    const val = Number(numMatch[1]);
+    if (Number.isFinite(val) && val > 0) return val;
+  }
+
+  return 1;
+}
 
 /**
  * เรียงลำดับโมเดล AI ที่จะใช้ดึงรายการค่าใช้จ่าย (มี Fallback อัตโนมัติเมื่อโมเดลหลักคิวแน่น 503):
@@ -111,7 +153,7 @@ export function parseTextDeterministically(
   for (const line of rawLines) {
     if (injectionPattern.test(line)) continue;
     if (/^[-=]{3,}$/.test(line)) continue;
-    if (/^(route|valid|vessel|etd|eta|remark|note|total)\b/i.test(line)) continue;
+    if (/^(route|valid|vessel|etd|eta|remark|note|total|shipment\s+volume|volume|measurement)\b/i.test(line)) continue;
 
     // Extract explicit USD amounts: "USD 2,295.00" or "$2,295" or "2,295 USD"
     const usdMatch =
@@ -189,16 +231,14 @@ export function parseTextDeterministically(
     else if (isPerCntr) chargeUnit = 'PER_CONTAINER';
     else if (isPerBl) chargeUnit = 'PER_HBL';
 
-    const isVolumeBased = isPerCbm || isPerWm || isPerRt;
-
-    // Calculate net cost (Cost สุทธิ): for per CBM / W/M / R/T, multiply unit rate by shipment volume
+    // Calculate net cost (Cost สุทธิ): multiply all quoted rates by effectiveVolume when volume > 1
     const unitAmountUsd = amountUsd;
     const unitAmountThb = amountThb;
     let netAmountUsd = amountUsd;
     let netAmountThb = amountThb;
     let netWhtAmount = whtAmount;
 
-    if (isVolumeBased && effectiveVolume > 1) {
+    if (effectiveVolume > 1) {
       if (amountUsd !== null) {
         netAmountUsd = Number(new Decimal(amountUsd).times(effectiveVolume).toFixed(4));
       }
@@ -211,8 +251,8 @@ export function parseTextDeterministically(
     }
 
     const snippetNote =
-      isVolumeBased && effectiveVolume > 1
-        ? `${line} (คูณ ${effectiveVolume} CBM/RT)`
+      effectiveVolume > 1
+        ? `${line} (คูณ ${effectiveVolume})`
         : line;
 
     charges.push({
@@ -223,7 +263,7 @@ export function parseTextDeterministically(
       amountUsd: netAmountUsd,
       unitAmountThb,
       unitAmountUsd,
-      multiplier: isVolumeBased && effectiveVolume > 1 ? effectiveVolume : 1,
+      multiplier: effectiveVolume > 1 ? effectiveVolume : 1,
       whtAmount: netWhtAmount,
       vatAmount: null,
       chargeUnit,
@@ -249,10 +289,8 @@ export function parseTextDeterministically(
 }
 
 /**
- * คำนวณ Cost สุทธิสำหรับเรทที่คิดตามปริมาตร (per CBM, per W/M, per R/T):
- * ตัวอย่าง: หากงานเป็น 2 CBM -> Cost สุทธิ = ราคาต่อหน่วย × 2
- *         หากงานเป็น 4 CBM หรือ R/T -> Cost สุทธิ = ราคาต่อหน่วย × 4
- * รายการคงที่ (per BL, per HBL, per shipment, per container) จะไม่ถูกคูณ
+ * คำนวณ Cost สุทธิโดยนำตัวเลขจำนวน/ปริมาตร (เช่น 2 CBM -> ×2, 3 CBM -> ×3, 4 CBM -> ×4)
+ * ไปคูณกับราคาทุกรายการ (THB, USD, WHT, VAT) เพื่อให้ได้ Cost สุทธิทันที
  */
 export function applyVolumeMultiplier(
   result: ExtractionResult,
@@ -271,14 +309,7 @@ export function applyVolumeMultiplier(
   }
 
   const updatedCharges = result.charges.map((ch) => {
-    const unitUpper = (ch.chargeUnit ?? '').toUpperCase();
-    const isVolumeBased =
-      unitUpper === 'PER_CBM' ||
-      unitUpper === 'PER_WM' ||
-      unitUpper === 'PER_RT' ||
-      /\b(?:cbm|m3|คิว|w\/?m|wlm|r\/?t|revenue\s*ton)\b/i.test(ch.rawChargeName);
-
-    if (!isVolumeBased) {
+    if (ch.cellStatus !== 'QUOTED') {
       return ch;
     }
 
@@ -293,6 +324,7 @@ export function applyVolumeMultiplier(
     let netAmountUsd = ch.amountUsd;
     let netAmountThb = ch.amountThb;
     let netWhtAmount = ch.whtAmount;
+    let netVatAmount = ch.vatAmount;
 
     if (unitAmountUsd !== null && unitAmountUsd !== undefined) {
       netAmountUsd = Number(new Decimal(unitAmountUsd).times(effectiveVolume).toFixed(4));
@@ -303,26 +335,24 @@ export function applyVolumeMultiplier(
     if (ch.whtAmount !== null && ch.whtAmount !== undefined) {
       netWhtAmount = Number(new Decimal(ch.whtAmount).times(effectiveVolume).toFixed(4));
     }
-
-    const normalizedUnit =
-      unitUpper === 'PER_WM'
-        ? 'PER_WM'
-        : unitUpper === 'PER_RT'
-          ? 'PER_RT'
-          : 'PER_CBM';
+    if (ch.vatAmount !== null && ch.vatAmount !== undefined) {
+      netVatAmount = Number(new Decimal(ch.vatAmount).times(effectiveVolume).toFixed(4));
+    }
 
     const snippet = ch.sourceTextSnippet
-      ? (ch.sourceTextSnippet.includes('คูณ') ? ch.sourceTextSnippet : `${ch.sourceTextSnippet} (คูณ ${effectiveVolume} CBM/RT)`)
-      : `(คูณ ${effectiveVolume} CBM/RT)`;
+      ? ch.sourceTextSnippet.includes('คูณ')
+        ? ch.sourceTextSnippet
+        : `${ch.sourceTextSnippet} (คูณ ${effectiveVolume})`
+      : `(คูณ ${effectiveVolume})`;
 
     return {
       ...ch,
-      chargeUnit: ch.chargeUnit ?? normalizedUnit,
       unitAmountUsd,
       unitAmountThb,
       amountUsd: netAmountUsd,
       amountThb: netAmountThb,
       whtAmount: netWhtAmount,
+      vatAmount: netVatAmount,
       multiplier: effectiveVolume,
       sourceTextSnippet: snippet,
     };
@@ -357,11 +387,6 @@ export async function runExtractionPipeline(
   const aiModels = resolveAiModels();
   let lastAiError: string | null = null;
 
-  const volumePromptNote =
-    input.volumeCbm && input.volumeCbm > 0
-      ? `\nSHIPMENT CONTEXT: LCL shipment volume is ${input.volumeCbm} CBM / R/T. For any charges priced per CBM, per W/M, or per R/T, calculate net cost = unit rate × ${input.volumeCbm}. Preserve the unit rate in unitAmountThb/unitAmountUsd and set multiplier to ${input.volumeCbm}.\n`
-      : '';
-
   // ขั้นที่ 2: เรียก LLM (Gemini/OpenAI) ผ่าน generateObject เพื่อบังคับ Output ตาม Zod Schema
   // หากโมเดลตัวแรกติด 503/Timeout จะวนลองโมเดลสำรองในลำดับถัดไปทันที (maxRetries: 0 เพื่อไม่รอค้าง)
   for (const aiConfig of aiModels) {
@@ -381,7 +406,7 @@ export async function runExtractionPipeline(
           abortSignal: AbortSignal.timeout(45_000),
           providerOptions: googleProviderOptions,
           // ห่อข้อมูลดิบด้วย <untrusted_document_payload> เพื่อลดความเสี่ยง Prompt Injection
-          prompt: `${volumePromptNote}Extract all freight cost line items from the following document:\n<untrusted_document_payload>\n${extractedTextLayer.slice(0, 40_000)}\n</untrusted_document_payload>`,
+          prompt: `Extract all freight cost line items from the following document:\n<untrusted_document_payload>\n${extractedTextLayer.slice(0, 40_000)}\n</untrusted_document_payload>`,
         });
         const finalResult = applyVolumeMultiplier(object, input.volumeCbm);
         return {
@@ -407,7 +432,7 @@ export async function runExtractionPipeline(
               content: [
                 {
                   type: 'text',
-                  text: `${volumePromptNote}Extract all freight cost items, WHT, VAT, THB, and USD figures from this rate document image/PDF. Never fabricate missing values.`,
+                  text: 'Extract all freight cost items, WHT, VAT, THB, and USD figures from this rate document image/PDF. Never fabricate missing values.',
                 },
                 {
                   type: 'file',
