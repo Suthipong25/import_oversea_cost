@@ -53,9 +53,15 @@ function resolveAiModels() {
   const googleKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (googleKey) {
     const google = createGoogleGenerativeAI({ apiKey: googleKey });
-    const primary = process.env.GEMINI_MODEL ?? 'gemini-3.6-flash';
+    const primary = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
     const candidates = Array.from(
-      new Set([primary, 'gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.7-flash'])
+      new Set([
+        primary,
+        'gemini-2.5-flash',
+        'gemini-2.0-flash',
+        'gemini-3.6-flash',
+        'gemini-3.5-flash-lite',
+      ])
     );
     return candidates.map((modelName) => ({
       provider: 'google',
@@ -353,8 +359,12 @@ export async function runExtractionPipeline(
       if (text.length >= 20) {
         extractedTextLayer = text;
       }
-    } catch {
-      // กรณีเป็น PDF แบบสแกน (ไม่มี Text Layer) จะปล่อยเป็น null เพื่อส่งไฟล์เข้า Vision LLM ในขั้นที่ 2
+    } catch (pdfErr) {
+      // กรณีเป็น PDF แบบสแกนหรือเกิดข้อผิดพลาดในการอ่าน Text Layer ให้บันทึก warning เพื่อตรวจสอบและส่งต่อให้ Vision LLM
+      console.warn(
+        '[PDF Extraction] unpdf failed to extract text layer, falling back to Vision LLM:',
+        pdfErr instanceof Error ? pdfErr.message : pdfErr
+      );
       extractedTextLayer = null;
     }
   }
@@ -366,9 +376,9 @@ export async function runExtractionPipeline(
   // หากโมเดลตัวแรกติด 503/Timeout จะวนลองโมเดลสำรองในลำดับถัดไปทันที (maxRetries: 0 เพื่อไม่รอค้าง)
   for (const aiConfig of aiModels) {
     try {
-      // ปรับ thinkingLevel เป็น 'low' เพื่อให้ Gemini 3 ตอบเร็วและไม่หมด Timeout ตอนอ่านตารางยาวๆ
+      // ปรับ thinkingLevel เป็น 'low' เฉพาะตระกูล Gemini 3 เพื่อให้ตอบเร็วและไม่เกิด 400 error กับ Gemini 2.0/2.5
       const googleProviderOptions =
-        aiConfig.provider === 'google'
+        aiConfig.provider === 'google' && aiConfig.modelName.startsWith('gemini-3')
           ? { google: { thinkingConfig: { thinkingLevel: 'low' as const } } }
           : undefined;
 

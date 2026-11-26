@@ -42,13 +42,18 @@ export async function GET(
     const buffer = await readPrivateFile(doc.storagePath);
     const safeName = doc.fileName.replace(/[^\w.-]/g, '_');
 
+    const cspHeader =
+      doc.mimeType === 'application/pdf'
+        ? "default-src 'self' 'unsafe-inline' blob: data:; object-src 'self' blob:; frame-ancestors 'self'"
+        : "default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; frame-ancestors 'self'";
+
     return new Response(new Uint8Array(buffer), {
       status: 200,
       headers: {
         'Content-Type': doc.mimeType,
         'Content-Disposition': `inline; filename="${safeName}"`,
         'X-Content-Type-Options': 'nosniff',
-        'Content-Security-Policy': "default-src 'none'; img-src 'self'; object-src 'self'",
+        'Content-Security-Policy': cspHeader,
         'Cache-Control': 'private, max-age=300',
       },
     });
