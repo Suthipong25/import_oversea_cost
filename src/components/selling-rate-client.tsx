@@ -417,6 +417,7 @@ export function SellingRateClient(props: SellingRateWorkspaceProps) {
     : '';
 
   async function handleOpenPdf() {
+    setError(null);
     if (
       currentStatus === 'Draft' ||
       currentStatus === 'Returned' ||
@@ -425,7 +426,40 @@ export function SellingRateClient(props: SellingRateWorkspaceProps) {
       const saved = await saveLines();
       if (!saved) return;
     }
-    window.open(`/api/selling-rates/${sellingRateId}/pdf?t=${Date.now()}`, '_blank', 'noopener');
+
+    setSaving(true);
+    try {
+      const pdfUrl = `/api/selling-rates/${sellingRateId}/pdf?t=${Date.now()}`;
+      const res = await fetch(pdfUrl, { cache: 'no-store' });
+      if (!res.ok) {
+        const errJson = (await res.json().catch(() => null)) as {
+          error?: { message?: string };
+        } | null;
+        setError(errJson?.error?.message ?? `สร้างไฟล์ PDF ไม่สำเร็จ (HTTP ${res.status})`);
+        return;
+      }
+
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const fileName = `SalePriceApprove-${props.shipment.shipmentRef}.pdf`;
+
+      // Try opening in a new tab first; if blocked by popup blocker or iframe, trigger direct download
+      const opened = window.open(blobUrl, '_blank');
+      if (!opened) {
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    } catch {
+      setError('ไม่สามารถดึงไฟล์ PDF จากเซิร์ฟเวอร์ได้ กรุณาตรวจสอบการเชื่อมต่อแล้วลองใหม่อีกครั้ง');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -456,15 +490,23 @@ export function SellingRateClient(props: SellingRateWorkspaceProps) {
             </div>
           </div>
 
-          <button
-            type="button"
-            disabled={saving}
-            onClick={handleOpenPdf}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-card)] hover:bg-[var(--brand)] hover:text-[var(--brand-fg)] hover:border-[var(--brand)] text-xs font-semibold disabled:opacity-50 ui-interactive"
-          >
-            <Printer className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{saving ? 'กำลังสร้าง PDF...' : 'Export PDF (A4)'}</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={saving}
+              onClick={handleOpenPdf}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-card)] hover:bg-[var(--brand)] hover:text-[var(--brand-fg)] hover:border-[var(--brand)] text-xs font-semibold disabled:opacity-50 ui-interactive"
+            >
+              <Printer className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{saving ? 'กำลังสร้าง PDF...' : 'Export PDF (A4)'}</span>
+            </button>
+            <a
+              href={`/api/selling-rates/${sellingRateId}/pdf?download=1`}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-subtle)] hover:bg-[var(--surface-muted)] text-xs font-semibold ui-interactive"
+            >
+              <span>Download PDF</span>
+            </a>
+          </div>
         </div>
 
         {/* 3-Step Pipeline */}
